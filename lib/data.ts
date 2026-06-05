@@ -1151,6 +1151,108 @@ export const WEEKLY_GOALS: WeeklyGoal[] = [
     createdAt: daysAgo(2) },
 ];
 
+// ── Releases ────────────────────────────────────────────────────────────
+// A Release is a PACKAGE / SCOPE container. It does NOT own anything and
+// does NOT belong to the product hierarchy (Capability Area → Feature
+// Group → Feature → Capability / Slice stays the source of truth). It
+// only collects pointers to existing roadmap objects we plan to ship
+// together, and one object can appear in multiple releases.
+//
+// Status enum mirrors the spec: Planned / In Progress / Released.
+// Target dates are both optional — when only one is set the UI shows a
+// single target; when both are set it renders as a range.
+export type ReleaseStatus = "planned" | "in_progress" | "released";
+
+export interface Release {
+  id: string;
+  title: string;
+  description?: string;
+  status: ReleaseStatus;
+  // Optional planning hints. We store ISO date strings so the seed +
+  // future date-picker UI agree on a wire format.
+  targetStart?: string;
+  targetEnd?: string;
+  // Link arrays — all many-to-many. Living on the Release means we
+  // don't need to add a `releaseIds` field on every other roadmap
+  // object; reverse lookups are derived ("which releases include
+  // slice X?" = releases.filter(r => r.linkedSliceIds.includes(x))).
+  linkedGoalIds: string[];
+  linkedFeatureIds: string[];
+  linkedSliceIds: string[];
+  linkedCapabilityIds: string[];
+  createdAt: string;
+}
+
+export const RELEASES: Release[] = [
+  // Worked example from the spec: "Private Beta" pulls together the
+  // Auth feature, its beta slice, the matching weekly goal, and three
+  // capabilities. Demonstrates: a release packages scope spanning the
+  // whole hierarchy without owning any of it.
+  {
+    id: "rel-private-beta",
+    title: "Private Beta",
+    description: "First closed-beta cohort. Smallest viable signup flow + the must-haves to support real customer email accounts.",
+    status: "planned",
+    targetStart: mondayISO(7),
+    targetEnd:   mondayISO(28),
+    linkedGoalIds:       ["goal-w-auth"],
+    linkedFeatureIds:    ["feat-register-email"],
+    linkedSliceIds:      ["slice-beta-registration"],
+    linkedCapabilityIds: ["cap-email-validation", "cap-email-verification", "cap-duplicate-email"],
+    createdAt: daysAgo(5),
+  },
+];
+
+// ── Themes ─────────────────────────────────────────────────────────────
+// A Theme is an OVERLAY / TAG. It groups items across the roadmap
+// without changing the product hierarchy. Themes don't own anything,
+// can't be parents, and don't move items around — they only collect
+// cross-cutting references.
+//
+// Each linked-array sits on the Theme itself (mirroring Release), so
+// reverse lookups stay derived ("which themes tag goal X?" =
+// themes.filter(t => t.linkedGoalIds.includes(x))).
+//
+// The optional `color` is a key into a small fixed palette the UI maps
+// to CSS variables. Keeping it as a key (not a hex) lets the palette
+// stay consistent with the rest of the app's status / accent colors.
+export type RoadmapThemeColor = "blue" | "amber" | "green" | "purple" | "pink" | "teal" | "gray";
+
+// Named `RoadmapTheme` (not just `Theme`) to avoid collision with the
+// app's existing `Theme = "light" | "dark"` UI-theme type in the store.
+export interface RoadmapTheme {
+  id: string;
+  title: string;
+  description?: string;
+  color?: RoadmapThemeColor;
+  linkedGoalIds: string[];
+  linkedIntentIds: string[];     // wip ids of type "intent"
+  linkedFeatureIds: string[];
+  linkedSliceIds: string[];
+  linkedCapabilityIds: string[];
+  linkedReleaseIds: string[];
+  createdAt: string;
+}
+
+export const THEMES: RoadmapTheme[] = [
+  // Worked example from the spec: "Auth Readiness" overlays the entire
+  // Auth-related stack — the registration feature, its beta slice, one
+  // capability, the matching weekly goal, and the Private Beta release.
+  {
+    id: "theme-auth-readiness",
+    title: "Auth Readiness",
+    description: "Everything we need shipped before the beta cohort can sign up. Cross-cuts product hierarchy + scope.",
+    color: "blue",
+    linkedGoalIds:       ["goal-w-auth"],
+    linkedIntentIds:     [],
+    linkedFeatureIds:    ["feat-register-email"],
+    linkedSliceIds:      ["slice-beta-registration"],
+    linkedCapabilityIds: ["cap-email-verification"],
+    linkedReleaseIds:    ["rel-private-beta"],
+    createdAt: daysAgo(4),
+  },
+];
+
 // Seed a realistic activity feed so demos show changes immediately. Each
 // WIP gets a "created" event, plus a few cards have recent moves so client
 // view has something to highlight.

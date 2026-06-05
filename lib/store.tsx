@@ -12,7 +12,9 @@ import {
   SPLIT_MAX_PER_SOURCE, splitChildrenCount,
   WeeklyGoal, WeeklyGoalStatus, ProductArea, Feature, FeatureStatus, FeatureSlice,
   FeatureGroup, ProductCapability, SliceCapabilityStatus,
+  Release, ReleaseStatus, RoadmapTheme,
   PRODUCT_AREAS, FEATURES, FEATURE_SLICES, FEATURE_GROUPS, PRODUCT_CAPABILITIES, WEEKLY_GOALS,
+  RELEASES, THEMES,
   hideUnderKey, findHideUnderRule, getUndoSafety,
   computeAutoPriority,
 } from "./data";
@@ -91,10 +93,11 @@ interface StoreState {
   // right tab and scroll/highlight the right target. The Roadmap page
   // consumes and clears it after applying.
   roadmapFocus: {
-    tab: "weekly" | "product";
+    tab: "weekly" | "product" | "releases" | "themes";
     goalId?: string;
     featureId?: string;
     sliceId?: string;
+    themeId?: string;
   } | null;
   // Roadmap / traceability collections — all V1 (no MoSCoW / release
   // planning yet). Mutated only via dedicated actions below so we can
@@ -105,6 +108,15 @@ interface StoreState {
   featureSlices: FeatureSlice[];
   featureGroups: FeatureGroup[];
   productCapabilities: ProductCapability[];
+  // Releases — lightweight scope packages. A release LINKS to goals /
+  // features / slices / capabilities; it does NOT own them, and the
+  // same target can appear in multiple releases.
+  releases: Release[];
+  // Themes — overlay tags. A theme LINKS to any of: goals, intents,
+  // features, slices, capabilities, releases. It is NOT a hierarchy
+  // node and does NOT own anything; the same target can carry many
+  // themes simultaneously.
+  themes: RoadmapTheme[];
   // Duplicate groups — both suggested (unconfirmed) and confirmed groups
   // live here. The model has a `confirmed` flag so we don't keep two
   // parallel collections.
@@ -186,10 +198,11 @@ interface StoreActions {
   toggleGoalCapability: (goalId: string, capabilityId: string) => void;
   toggleGoalIntent:     (goalId: string, intentId: string) => void;
   setRoadmapFocus:      (focus: {
-    tab: "weekly" | "product";
+    tab: "weekly" | "product" | "releases" | "themes";
     goalId?: string;
     featureId?: string;
     sliceId?: string;
+    themeId?: string;
   } | null) => void;
   toggleFeatureIntent:      (featureId: string, intentId: string) => void;
   toggleFeatureSliceIntent: (sliceId: string, intentId: string) => void;
@@ -200,6 +213,32 @@ interface StoreActions {
   createProductCapability: (input: { title: string; featureId: string }) => string;
   updateProductCapability: (id: string, patch: Partial<ProductCapability>) => void;
   deleteProductCapability: (id: string) => void;
+  // ── Release CRUD + linking ───────────────────────────────────────────
+  // Release is a scope container only. Each toggle action mutates ONE
+  // array on the release; the linked target stays untouched. Deleting a
+  // goal / feature / slice / capability filters orphaned ids out of
+  // every release (cascade lives in the corresponding delete actions).
+  createRelease: (input: { title: string; description?: string }) => string;
+  updateRelease: (id: string, patch: Partial<Release>) => void;
+  deleteRelease: (id: string) => void;
+  toggleReleaseGoal:       (releaseId: string, goalId: string) => void;
+  toggleReleaseFeature:    (releaseId: string, featureId: string) => void;
+  toggleReleaseSlice:      (releaseId: string, sliceId: string) => void;
+  toggleReleaseCapability: (releaseId: string, capabilityId: string) => void;
+  // ── Theme CRUD + linking ─────────────────────────────────────────────
+  // Themes are OVERLAYS: a theme links to goals / intents / features /
+  // slices / capabilities / releases without owning any of them. Each
+  // toggle mutates one array on the theme; cascades from delete actions
+  // strip orphaned ids out of every theme.
+  createTheme: (input: { title: string; description?: string; color?: RoadmapTheme["color"] }) => string;
+  updateTheme: (id: string, patch: Partial<RoadmapTheme>) => void;
+  deleteTheme: (id: string) => void;
+  toggleThemeGoal:       (themeId: string, goalId: string) => void;
+  toggleThemeIntent:     (themeId: string, intentId: string) => void;
+  toggleThemeFeature:    (themeId: string, featureId: string) => void;
+  toggleThemeSlice:      (themeId: string, sliceId: string) => void;
+  toggleThemeCapability: (themeId: string, capabilityId: string) => void;
+  toggleThemeRelease:    (themeId: string, releaseId: string) => void;
   // Set a slice's inclusion weight for one capability. Passing null
   // unselects (capability isn't part of the slice). The capability
   // must belong to the slice's parent Feature; otherwise the call is
@@ -431,6 +470,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [featureSlices, setFeatureSlices] = useState<FeatureSlice[]>(FEATURE_SLICES);
   const [featureGroups, setFeatureGroups] = useState<FeatureGroup[]>(FEATURE_GROUPS);
   const [productCapabilities, setProductCapabilities] = useState<ProductCapability[]>(PRODUCT_CAPABILITIES);
+  const [releases, setReleases] = useState<Release[]>(RELEASES);
+  const [themes, setThemes] = useState<RoadmapTheme[]>(THEMES);
   const [splitView, setSplitView]           = useState<{ leftId: string; rightId: string } | null>(null);
   const [wipEvents, setWipEvents]           = useState<WipEvent[]>(WIP_EVENTS);
   // Default to ~2 days ago so the demo seed has something fresh-looking.
@@ -2455,6 +2496,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const deleteWeeklyGoal = useCallback((id: string) => {
     setWeeklyGoals(prev => prev.filter(g => g.id !== id));
+    // Cascade: drop this goal from any release / theme that linked it.
+    setReleases(prev => prev.map(r => r.linkedGoalIds.includes(id)
+      ? { ...r, linkedGoalIds: r.linkedGoalIds.filter(gid => gid !== id) }
+      : r));
+    setThemes(prev => prev.map(t => t.linkedGoalIds.includes(id)
+      ? { ...t, linkedGoalIds: t.linkedGoalIds.filter(gid => gid !== id) }
+      : t));
   }, []);
 
   const createProductArea = useCallback((input: { title: string; description?: string }) => {
@@ -2485,6 +2533,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       linkedFeatureIds: g.linkedFeatureIds.filter(fid => !featuresInArea.includes(fid)),
       linkedSliceIds: g.linkedSliceIds.filter(sid => !slicesInArea.includes(sid)),
       linkedCapabilityIds: g.linkedCapabilityIds.filter(cid => !capsInArea.includes(cid)),
+    })));
+    setReleases(prev => prev.map(r => ({
+      ...r,
+      linkedFeatureIds: r.linkedFeatureIds.filter(fid => !featuresInArea.includes(fid)),
+      linkedSliceIds: r.linkedSliceIds.filter(sid => !slicesInArea.includes(sid)),
+      linkedCapabilityIds: r.linkedCapabilityIds.filter(cid => !capsInArea.includes(cid)),
+    })));
+    setThemes(prev => prev.map(t => ({
+      ...t,
+      linkedFeatureIds: t.linkedFeatureIds.filter(fid => !featuresInArea.includes(fid)),
+      linkedSliceIds: t.linkedSliceIds.filter(sid => !slicesInArea.includes(sid)),
+      linkedCapabilityIds: t.linkedCapabilityIds.filter(cid => !capsInArea.includes(cid)),
     })));
   }, [features, featureSlices, productCapabilities]);
 
@@ -2520,6 +2580,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       linkedSliceIds: g.linkedSliceIds.filter(sid => !slicesInFeature.includes(sid)),
       linkedCapabilityIds: g.linkedCapabilityIds.filter(cid => !capsInFeature.includes(cid)),
     })));
+    setReleases(prev => prev.map(r => ({
+      ...r,
+      linkedFeatureIds: r.linkedFeatureIds.filter(fid => fid !== id),
+      linkedSliceIds: r.linkedSliceIds.filter(sid => !slicesInFeature.includes(sid)),
+      linkedCapabilityIds: r.linkedCapabilityIds.filter(cid => !capsInFeature.includes(cid)),
+    })));
+    setThemes(prev => prev.map(t => ({
+      ...t,
+      linkedFeatureIds: t.linkedFeatureIds.filter(fid => fid !== id),
+      linkedSliceIds: t.linkedSliceIds.filter(sid => !slicesInFeature.includes(sid)),
+      linkedCapabilityIds: t.linkedCapabilityIds.filter(cid => !capsInFeature.includes(cid)),
+    })));
   }, [featureSlices, productCapabilities]);
 
   const createFeatureSlice = useCallback((input: { title: string; featureId: string; description?: string }) => {
@@ -2544,6 +2616,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ...g,
       linkedSliceIds: g.linkedSliceIds.filter(sid => sid !== id),
     })));
+    setReleases(prev => prev.map(r => r.linkedSliceIds.includes(id)
+      ? { ...r, linkedSliceIds: r.linkedSliceIds.filter(sid => sid !== id) }
+      : r));
+    setThemes(prev => prev.map(t => t.linkedSliceIds.includes(id)
+      ? { ...t, linkedSliceIds: t.linkedSliceIds.filter(sid => sid !== id) }
+      : t));
   }, []);
 
   // Toggle helpers — symmetric add/remove with a single click. Each
@@ -2619,7 +2697,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const deleteProductCapability = useCallback((id: string) => {
     setProductCapabilities(prev => prev.filter(c => c.id !== id));
     // Cascade: drop the capability from every slice that selected it,
-    // and from every weekly goal that linked it.
+    // from every weekly goal that linked it, and from every release
+    // that packaged it.
     setFeatureSlices(prev => prev.map(s => {
       if (!s.capabilityStatus || !(id in s.capabilityStatus)) return s;
       const next = { ...s.capabilityStatus };
@@ -2629,6 +2708,111 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setWeeklyGoals(prev => prev.map(g => g.linkedCapabilityIds.includes(id)
       ? { ...g, linkedCapabilityIds: g.linkedCapabilityIds.filter(cid => cid !== id) }
       : g));
+    setReleases(prev => prev.map(r => r.linkedCapabilityIds.includes(id)
+      ? { ...r, linkedCapabilityIds: r.linkedCapabilityIds.filter(cid => cid !== id) }
+      : r));
+    setThemes(prev => prev.map(t => t.linkedCapabilityIds.includes(id)
+      ? { ...t, linkedCapabilityIds: t.linkedCapabilityIds.filter(cid => cid !== id) }
+      : t));
+  }, []);
+
+  // ── Releases — CRUD + link toggles ───────────────────────────────────
+  const createRelease = useCallback((input: { title: string; description?: string }) => {
+    const id = newId("rel");
+    const rel: Release = {
+      id,
+      title: input.title.trim() || "Untitled release",
+      description: input.description,
+      status: "planned",
+      linkedGoalIds: [], linkedFeatureIds: [],
+      linkedSliceIds: [], linkedCapabilityIds: [],
+      createdAt: nowISO(),
+    };
+    setReleases(prev => prev.some(r => r.id === id) ? prev : [...prev, rel]);
+    return id;
+  }, []);
+  const updateRelease = useCallback((id: string, patch: Partial<Release>) => {
+    setReleases(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+  }, []);
+  const deleteRelease = useCallback((id: string) => {
+    setReleases(prev => prev.filter(r => r.id !== id));
+    // Cascade: drop this release from any theme that tagged it.
+    setThemes(prev => prev.map(t => t.linkedReleaseIds.includes(id)
+      ? { ...t, linkedReleaseIds: t.linkedReleaseIds.filter(rid => rid !== id) }
+      : t));
+  }, []);
+  const toggleReleaseGoal = useCallback((releaseId: string, goalId: string) => {
+    setReleases(prev => prev.map(r => r.id === releaseId
+      ? { ...r, linkedGoalIds: toggleArrayMember(r.linkedGoalIds, goalId) }
+      : r));
+  }, []);
+  const toggleReleaseFeature = useCallback((releaseId: string, featureId: string) => {
+    setReleases(prev => prev.map(r => r.id === releaseId
+      ? { ...r, linkedFeatureIds: toggleArrayMember(r.linkedFeatureIds, featureId) }
+      : r));
+  }, []);
+  const toggleReleaseSlice = useCallback((releaseId: string, sliceId: string) => {
+    setReleases(prev => prev.map(r => r.id === releaseId
+      ? { ...r, linkedSliceIds: toggleArrayMember(r.linkedSliceIds, sliceId) }
+      : r));
+  }, []);
+  const toggleReleaseCapability = useCallback((releaseId: string, capabilityId: string) => {
+    setReleases(prev => prev.map(r => r.id === releaseId
+      ? { ...r, linkedCapabilityIds: toggleArrayMember(r.linkedCapabilityIds, capabilityId) }
+      : r));
+  }, []);
+
+  // ── Themes — CRUD + link toggles ─────────────────────────────────────
+  const createTheme = useCallback((input: { title: string; description?: string; color?: RoadmapTheme["color"] }) => {
+    const id = newId("theme");
+    const theme: RoadmapTheme = {
+      id,
+      title: input.title.trim() || "Untitled theme",
+      description: input.description,
+      color: input.color,
+      linkedGoalIds: [], linkedIntentIds: [],
+      linkedFeatureIds: [], linkedSliceIds: [],
+      linkedCapabilityIds: [], linkedReleaseIds: [],
+      createdAt: nowISO(),
+    };
+    setThemes(prev => prev.some(t => t.id === id) ? prev : [...prev, theme]);
+    return id;
+  }, []);
+  const updateTheme = useCallback((id: string, patch: Partial<RoadmapTheme>) => {
+    setThemes(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+  }, []);
+  const deleteTheme = useCallback((id: string) => {
+    setThemes(prev => prev.filter(t => t.id !== id));
+  }, []);
+  const toggleThemeGoal = useCallback((themeId: string, goalId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedGoalIds: toggleArrayMember(t.linkedGoalIds, goalId) }
+      : t));
+  }, []);
+  const toggleThemeIntent = useCallback((themeId: string, intentId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedIntentIds: toggleArrayMember(t.linkedIntentIds, intentId) }
+      : t));
+  }, []);
+  const toggleThemeFeature = useCallback((themeId: string, featureId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedFeatureIds: toggleArrayMember(t.linkedFeatureIds, featureId) }
+      : t));
+  }, []);
+  const toggleThemeSlice = useCallback((themeId: string, sliceId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedSliceIds: toggleArrayMember(t.linkedSliceIds, sliceId) }
+      : t));
+  }, []);
+  const toggleThemeCapability = useCallback((themeId: string, capabilityId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedCapabilityIds: toggleArrayMember(t.linkedCapabilityIds, capabilityId) }
+      : t));
+  }, []);
+  const toggleThemeRelease = useCallback((themeId: string, releaseId: string) => {
+    setThemes(prev => prev.map(t => t.id === themeId
+      ? { ...t, linkedReleaseIds: toggleArrayMember(t.linkedReleaseIds, releaseId) }
+      : t));
   }, []);
 
   const setSliceCapabilityStatus = useCallback((sliceId: string, capabilityId: string, status: SliceCapabilityStatus | null) => {
@@ -2698,6 +2882,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     signalComments, signalAttachments, signalWipLinks,
     postCreatePrompt, sourceOfWipFilter, roadmapFocus,
     weeklyGoals, productAreas, features, featureSlices, featureGroups, productCapabilities,
+    releases, themes,
     duplicateGroups,
     splitView,
     wipEvents, clientPreviousVisitAt,
@@ -2722,6 +2907,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     toggleFeatureIntent, toggleFeatureSliceIntent,
     createFeatureGroup, updateFeatureGroup, deleteFeatureGroup,
     createProductCapability, updateProductCapability, deleteProductCapability,
+    createRelease, updateRelease, deleteRelease,
+    toggleReleaseGoal, toggleReleaseFeature, toggleReleaseSlice, toggleReleaseCapability,
+    createTheme, updateTheme, deleteTheme,
+    toggleThemeGoal, toggleThemeIntent, toggleThemeFeature, toggleThemeSlice, toggleThemeCapability, toggleThemeRelease,
     setSliceCapabilityStatus,
     skipSignal, rejectSignalWithReason, reopenSignalWithReason, reviveSkip,
     openSplitView, closeSplitView,

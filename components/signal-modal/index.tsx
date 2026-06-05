@@ -11,6 +11,7 @@ import { X, ChevronLeft, ChevronRight, Edit, Image, Link, Task, Intent, Tag, Plu
 import { absDate, relTime } from "@/lib/time";
 import { DuplicateSection } from "./duplicate-section";
 import { SplitSignalModal } from "@/components/split-signal-modal";
+import { computeSignalCoverage, signalCoverageLabel, signalCoverageStyle } from "@/components/wip/page";
 
 // ── Create work item form (with description) ──────────────────────────────
 
@@ -1716,19 +1717,52 @@ function HiddenSignalRow({ signal, onOpen, onRestore, readOnly }: {
 // ── Linked work section ────────────────────────────────────────────────────
 
 function LinkedWorkSection({ signal, wips }: { signal: Signal; wips: import("@/lib/data").Wip[] }) {
-  const { openWip, setRoute, openSignal, signalWipLinks, setLinkRelationship, unlinkSignalFromWip, appMode } = useStore();
+  const { openWip, setRoute, openSignal, signalWipLinks, setLinkRelationship, unlinkSignalFromWip, appMode, wipItems } = useStore();
   const readOnly = appMode === "client";
+
+  // Signal coverage — derived from the relationships of every linked
+  // wip + each wip's current Kanban column. The signal's own status
+  // (new / accepted / ready / closed) is left alone; coverage is a
+  // separate, overlay-only read of "does the work we've linked actually
+  // resolve this signal?". Manual: nothing here auto-closes the signal.
+  const coverage = computeSignalCoverage(signal.id, signalWipLinks, wipItems);
+  const linkedIntents = wips.filter(w => w.type === "intent");
+  // Follow-up hint: the signal isn't fully addressed AND it isn't
+  // already closed. Suppressed when coverage is "open" with zero links —
+  // the empty state below already covers that case.
+  const needsFollowUp =
+    signal.status !== "closed" &&
+    wips.length > 0 &&
+    (coverage === "partially" || coverage === "investigating" || coverage === "informational");
+
   return (
     <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: "var(--radius-lg)", border: "1px solid var(--border)", background: "var(--bg-sunken)" }}>
       <div style={{
         fontSize: "var(--fs-meta)", color: "var(--text-tertiary)",
         fontWeight: 500, marginBottom: 10, display: "flex",
-        alignItems: "center", gap: 8,
+        alignItems: "center", gap: 8, flexWrap: "wrap",
       }}>
         <Link size={12} /> Linked work · {wips.length}
+        {linkedIntents.length > 0 && (
+          <span style={signalCoverageStyle(coverage)} title="Signal coverage — derived from linked intents. Not a status; the signal still needs a human decision to close.">
+            {signalCoverageLabel(coverage)}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         {!readOnly && <LinkExistingWorkButton signal={signal} />}
       </div>
+      {needsFollowUp && (
+        <div style={{
+          padding: "6px 10px", marginBottom: 8,
+          fontSize: 11, color: "#b45309",
+          background: "rgba(245,158,11,0.06)",
+          border: "1px dashed rgba(245,158,11,0.45)",
+          borderRadius: "var(--radius)",
+          lineHeight: 1.45,
+        }}>
+          The linked work doesn't fully address this signal yet — review whether more intents are needed before closing.
+        </div>
+      )}
       {wips.length === 0 && (
         <div style={{
           padding: "10px 12px", textAlign: "center", fontSize: "var(--fs-meta)",
@@ -1840,13 +1874,13 @@ function LinkedWorkSection({ signal, wips }: { signal: Signal; wips: import("@/l
                       fontSize: 10, height: 22, padding: "0 4px",
                     }}
                   >
-                    <option value="resolves">Resolves</option>
-                    <option value="partially_addresses">Contributes to (source signal)</option>
+                    <option value="resolves">Addresses</option>
+                    <option value="partially_addresses">Partially addresses</option>
                     <option value="investigates">Investigates</option>
                     <option value="researches">Researches</option>
                     <option value="clarifies">Clarifies</option>
                     <option value="informs">Informs</option>
-                    <option value="related_to">Related to</option>
+                    <option value="related_to">Related</option>
                   </select>
                 )}
                 {!readOnly && (

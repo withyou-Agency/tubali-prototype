@@ -4,6 +4,7 @@ import { useStore } from "@/lib/store";
 import {
   WeeklyGoal, WeeklyGoalStatus, ProductArea, Feature, FeatureStatus, FeatureSlice,
   FeatureGroup, ProductCapability, SliceCapabilityStatus,
+  Release, ReleaseStatus, RoadmapTheme, RoadmapThemeColor,
   Wip, userById,
 } from "@/lib/data";
 import { Plus, X, ChevronDown, ChevronRight, Check, Task, Intent } from "@/components/ui/icons";
@@ -22,7 +23,13 @@ import { Plus, X, ChevronDown, ChevronRight, Check, Task, Intent } from "@/compo
 // Linking surfaces use the same multi-select popover so the user
 // recognises the pattern across views.
 
-type RoadmapTab = "weekly" | "product";
+type RoadmapTab = "weekly" | "product" | "releases" | "themes";
+
+// Feature flag: Themes are hidden in the UI for now. The data model,
+// store actions, and component definitions all stay in the codebase
+// (so re-enabling is a one-line flip), but the tab, pills, and pickers
+// don't render while this is false.
+const THEMES_ENABLED = false;
 
 export function RoadmapPage() {
   const { roadmapFocus, setRoadmapFocus } = useStore();
@@ -75,16 +82,25 @@ export function RoadmapPage() {
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
-            {tab === "weekly" ? "Weekly goals" : "Product view"}
+            {tab === "weekly" ? "Weekly goals"
+              : tab === "product" ? "Product view"
+              : tab === "releases" ? "Releases"
+              : "Themes"}
           </span>
           <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
             {tab === "weekly"
               ? "· Connect each goal to the intents and features that support it"
-              : "· Browse product capability areas, features, and slices"}
+              : tab === "product"
+                ? "· Browse product capability areas, features, and slices"
+                : tab === "releases"
+                  ? "· Package goals, features, slices, and capabilities you plan to ship together"
+                  : "· Cross-cutting tags that overlay the roadmap without changing the hierarchy"}
           </span>
           <span style={{ flex: 1 }} />
           <div style={{ display: "inline-flex", gap: 2, background: "var(--bg-sunken)", borderRadius: 100, padding: 2 }}>
-            {(["weekly", "product"] as RoadmapTab[]).map(t => (
+            {((THEMES_ENABLED
+              ? ["weekly", "product", "releases", "themes"]
+              : ["weekly", "product", "releases"]) as RoadmapTab[]).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -97,7 +113,10 @@ export function RoadmapPage() {
                   boxShadow: tab === t ? "var(--shadow-sm)" : undefined,
                 }}
               >
-                {t === "weekly" ? "Weekly goals" : "Product view"}
+                {t === "weekly" ? "Weekly goals"
+                  : t === "product" ? "Product view"
+                  : t === "releases" ? "Releases"
+                  : "Themes"}
               </button>
             ))}
           </div>
@@ -114,12 +133,17 @@ export function RoadmapPage() {
         )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-        {tab === "weekly"
-          ? <WeeklyGoalsView featureFilter={featureFilter} focusedGoalId={focusedGoalId} />
-          : <ProductExplorerView
-              selectedFeatureId={productSelectedFeatureId}
-              onSelectFeature={setProductSelectedFeatureId}
-            />}
+        {tab === "weekly" && (
+          <WeeklyGoalsView featureFilter={featureFilter} focusedGoalId={focusedGoalId} />
+        )}
+        {tab === "product" && (
+          <ProductExplorerView
+            selectedFeatureId={productSelectedFeatureId}
+            onSelectFeature={setProductSelectedFeatureId}
+          />
+        )}
+        {tab === "releases" && <ReleasesView />}
+        {tab === "themes" && THEMES_ENABLED && <ThemesView />}
       </div>
     </div>
   );
@@ -268,17 +292,108 @@ function pillStyle(kind: "planned" | "in_progress" | "done" | "not_started"): Re
 // lives in each column header so the user picks the week implicitly by
 // clicking the right one.
 
+// Filter bundle for the Weekly Goals view. Held at the WeeklyGoalsView
+// level (not in the store) because it's per-session state, not persisted.
+// `featureFilter` shadows the Roadmap-header chip strip so the
+// FeaturesSummaryStrip + the new filter bar share a single source of
+// truth for the feature dimension.
+type WeeklyFilterState = {
+  query: string;
+  featureId: string | null;
+  sliceId: string | null;
+  capabilityId: string | null;
+  themeId: string | null;
+  releaseId: string | null;
+  goalStatus: "all" | WeeklyGoalStatus;
+  intentStatus: "all" | "backlog" | "to_do" | "in_progress" | "done";
+};
+
+const EMPTY_WEEKLY_FILTERS: Omit<WeeklyFilterState, "featureId"> = {
+  query: "",
+  sliceId: null,
+  capabilityId: null,
+  themeId: null,
+  releaseId: null,
+  goalStatus: "all",
+  intentStatus: "all",
+};
+
 function WeeklyGoalsView({ featureFilter, focusedGoalId }: { featureFilter: string | null; focusedGoalId: string | null }) {
-  const { weeklyGoals, createWeeklyGoal, features } = useStore();
-  // Group goals by weekStart, sorted ascending so the timeline reads
-  // left-to-right. When a feature filter is active we keep every week
-  // column (so the timeline structure stays stable) but narrow each
-  // column's goals to those that link the chosen feature.
+  const {
+    weeklyGoals, createWeeklyGoal,
+    features, featureSlices, productCapabilities, themes, releases, wipItems,
+  } = useStore();
+
+  // Local filter state. The featureFilter prop drives the `featureId`
+  // dimension so the header chip strip and the filter bar stay in
+  // sync; clearing here doesn't reach back into RoadmapPage because the
+  // strip's clear-on-X handler already covers that path.
+  const [extraFilters, setExtraFilters] = useState<Omit<WeeklyFilterState, "featureId">>(EMPTY_WEEKLY_FILTERS);
+  const filters: WeeklyFilterState = { ...extraFilters, featureId: featureFilter };
+
+  // Resolve the picked theme/release once for the matcher.
+  const activeTheme   = themes.find(t => t.id === filters.themeId) ?? null;
+  const activeRelease = releases.find(r => r.id === filters.releaseId) ?? null;
+  const normalizedQuery = filters.query.trim().toLowerCase();
+
+  // ── Matchers ───────────────────────────────────────────────────────
+  // A goal passes the filter set iff it matches ALL active dimensions.
+  // Search query expands across goal title + notes + the titles of its
+  // linked intents / features / slices / capabilities so the user can
+  // find a goal by typing the name of something it references.
+  const goalMatchesQuery = (g: WeeklyGoal): boolean => {
+    if (normalizedQuery === "") return true;
+    if (g.title.toLowerCase().includes(normalizedQuery)) return true;
+    if (g.notes?.toLowerCase().includes(normalizedQuery)) return true;
+    for (const fid of g.linkedFeatureIds) {
+      const t = features.find(f => f.id === fid)?.title;
+      if (t?.toLowerCase().includes(normalizedQuery)) return true;
+    }
+    for (const sid of g.linkedSliceIds) {
+      const s = featureSlices.find(x => x.id === sid);
+      if (s?.title.toLowerCase().includes(normalizedQuery)) return true;
+      if (s?.description?.toLowerCase().includes(normalizedQuery)) return true;
+    }
+    for (const cid of g.linkedCapabilityIds) {
+      const t = productCapabilities.find(c => c.id === cid)?.title;
+      if (t?.toLowerCase().includes(normalizedQuery)) return true;
+    }
+    for (const iid of g.linkedIntentIds) {
+      const w = wipItems.find(x => x.id === iid);
+      if (w?.title.toLowerCase().includes(normalizedQuery)) return true;
+    }
+    return false;
+  };
+  const goalMatches = (g: WeeklyGoal): boolean => {
+    if (!goalMatchesQuery(g)) return false;
+    if (filters.featureId && !g.linkedFeatureIds.includes(filters.featureId)) return false;
+    if (filters.sliceId && !g.linkedSliceIds.includes(filters.sliceId)) return false;
+    if (filters.capabilityId && !g.linkedCapabilityIds.includes(filters.capabilityId)) return false;
+    if (activeTheme && !activeTheme.linkedGoalIds.includes(g.id)) return false;
+    if (activeRelease && !activeRelease.linkedGoalIds.includes(g.id)) return false;
+    if (filters.goalStatus !== "all" && g.status !== filters.goalStatus) return false;
+    if (filters.intentStatus !== "all") {
+      // "any linked intent currently sits in <column>" — keeps the
+      // matcher simple and useful (e.g. "show me goals with work in
+      // progress").
+      const any = g.linkedIntentIds.some(iid => {
+        const w = wipItems.find(x => x.id === iid);
+        return w?.column === filters.intentStatus;
+      });
+      if (!any) return false;
+    }
+    return true;
+  };
+
+  // Group goals by week, applying the filter set. We keep every week
+  // column visible (even when empty after filtering) so the timeline
+  // structure stays stable — matches the previous featureFilter UX.
   const groups = useMemo(() => {
-    const filtered = featureFilter
-      ? weeklyGoals.filter(g => g.linkedFeatureIds.includes(featureFilter))
-      : weeklyGoals;
+    const filtered = weeklyGoals.filter(goalMatches);
     const byWeek = new Map<string, WeeklyGoal[]>();
+    // Seed the map with every week that exists in the source so empty
+    // columns still render when filtering hides their goals.
+    for (const g of weeklyGoals) if (!byWeek.has(g.weekStart)) byWeek.set(g.weekStart, []);
     for (const g of filtered) {
       const arr = byWeek.get(g.weekStart) ?? [];
       arr.push(g);
@@ -287,16 +402,34 @@ function WeeklyGoalsView({ featureFilter, focusedGoalId }: { featureFilter: stri
     return Array.from(byWeek.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([weekStart, items]) => ({ weekStart, items: items.slice().sort((x, y) => x.createdAt.localeCompare(y.createdAt)) }));
-  }, [weeklyGoals, featureFilter]);
-  const filterLabel = featureFilter ? features.find(f => f.id === featureFilter)?.title : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weeklyGoals, normalizedQuery, filters.featureId, filters.sliceId, filters.capabilityId,
+       filters.themeId, filters.releaseId, filters.goalStatus, filters.intentStatus,
+       features, featureSlices, productCapabilities, themes, releases, wipItems]);
+
+  const anyFilterActive =
+    normalizedQuery !== "" ||
+    filters.featureId !== null ||
+    filters.sliceId !== null ||
+    filters.capabilityId !== null ||
+    filters.themeId !== null ||
+    filters.releaseId !== null ||
+    filters.goalStatus !== "all" ||
+    filters.intentStatus !== "all";
+
+  const handleClearFilters = () => {
+    setExtraFilters(EMPTY_WEEKLY_FILTERS);
+    // featureFilter lives at RoadmapPage; the strip's "All" chip is the
+    // user's path back to clearing that one (we keep them visually
+    // linked but state-independent to avoid prop-drilling a setter).
+  };
 
   const handleAddWeek = () => {
-    // Pick the Monday of next week from the latest column, or "this Monday".
     const latest = groups[groups.length - 1]?.weekStart;
     const base = latest ? new Date(latest) : (() => {
       const d = new Date();
-      const day = d.getDay(); // 0 Sun..6 Sat
-      const diff = (day === 0 ? -6 : 1) - day; // back to Monday
+      const day = d.getDay();
+      const diff = (day === 0 ? -6 : 1) - day;
       d.setHours(0, 0, 0, 0);
       d.setDate(d.getDate() + diff);
       return d;
@@ -305,43 +438,250 @@ function WeeklyGoalsView({ featureFilter, focusedGoalId }: { featureFilter: stri
     createWeeklyGoal({ title: "Untitled goal", weekStart: next.toISOString() });
   };
 
-  // When the filter narrows everything to zero goals, render an empty
-  // state instead of just the "Add next week" button — so the user
-  // doesn't think their goals vanished.
-  const isEmptyAfterFilter = featureFilter !== null && groups.every(g => g.items.length === 0);
+  const matchingCount = groups.reduce((n, g) => n + g.items.length, 0);
+  const isEmptyAfterFilter = anyFilterActive && matchingCount === 0;
 
   return (
     <div style={{
-      display: "flex", gap: 14, alignItems: "flex-start",
-      padding: 16, minHeight: "100%",
+      display: "flex", flexDirection: "column",
+      minHeight: "100%",
     }}>
-      {isEmptyAfterFilter ? (
-        <div style={{
-          margin: "40px auto", maxWidth: 380, textAlign: "center",
-          fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
-        }}>
-          No weekly goals are linked to <strong style={{ color: "var(--text)" }}>{filterLabel}</strong> yet. Clear the filter to see everything, or add this feature to a goal to make it appear here.
+      {/* Filter bar */}
+      <WeeklyGoalsFilterBar
+        filters={filters}
+        onChange={(patch) => setExtraFilters(prev => ({ ...prev, ...patch }))}
+        onClear={handleClearFilters}
+        anyActive={anyFilterActive}
+        matchingCount={matchingCount}
+        totalCount={weeklyGoals.length}
+      />
+
+      {/* Timeline */}
+      <div style={{
+        display: "flex", gap: 14, alignItems: "flex-start",
+        padding: 16, flex: 1, minHeight: 0,
+      }}>
+        {isEmptyAfterFilter ? (
+          <div style={{
+            margin: "40px auto", maxWidth: 440, textAlign: "center",
+            fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+          }}>
+            No goals match the current filters. <button
+              onClick={handleClearFilters}
+              style={{ background: "transparent", border: "none", padding: 0, color: "var(--accent)", fontSize: "var(--fs-body)", cursor: "pointer", textDecoration: "underline" }}
+            >Clear filters</button> to see everything again.
+          </div>
+        ) : groups.map(g => (
+          <WeekColumn key={g.weekStart} weekStart={g.weekStart} goals={g.items} focusedGoalId={focusedGoalId} />
+        ))}
+        <button
+          onClick={handleAddWeek}
+          style={{
+            flexShrink: 0, width: 340,
+            padding: "12px 14px",
+            border: "1px dashed var(--border-strong)",
+            borderRadius: "var(--radius-lg)",
+            background: "transparent",
+            color: "var(--text-tertiary)",
+            fontSize: "var(--fs-meta)", fontWeight: 500,
+            cursor: "pointer",
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+          onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+        >
+          + Add next week
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── WeeklyGoalsFilterBar ────────────────────────────────────────────────
+// Compact filter strip above the weekly timeline. Always-visible so the
+// active dimensions stay legible. Each dimension is a native <select>
+// to keep the prototype lean (no bespoke popover per dimension), but
+// active ones get an accent border + tint so the user can see what's
+// narrowing the view at a glance.
+//
+// `featureId` is read-only from this bar's perspective — it's already
+// controlled by the FeaturesSummaryStrip in the Roadmap header. We
+// surface a small "Linked feature" select here too so users who never
+// notice the chip strip can still narrow by feature; toggling it
+// requires passing a setter down, which we avoid for now (the strip
+// keeps a single source of truth). Until that's wired, the feature
+// select reads but doesn't write — clear via the strip's All chip.
+function WeeklyGoalsFilterBar({
+  filters, onChange, onClear, anyActive, matchingCount, totalCount,
+}: {
+  filters: WeeklyFilterState;
+  onChange: (patch: Partial<Omit<WeeklyFilterState, "featureId">>) => void;
+  onClear: () => void;
+  anyActive: boolean;
+  matchingCount: number;
+  totalCount: number;
+}) {
+  const { features, featureSlices, productCapabilities, themes, releases } = useStore();
+  const selectStyle = (active: boolean): React.CSSProperties => ({
+    minWidth: 0,
+    padding: "4px 8px",
+    border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+    borderRadius: "var(--radius)",
+    background: active ? "var(--accent-soft)" : "var(--bg)",
+    color: active ? "var(--accent)" : "var(--text)",
+    fontSize: 11, outline: "none", flex: "0 1 auto",
+  });
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 8,
+      padding: "10px 16px",
+      borderBottom: "1px solid var(--border)",
+      background: "var(--bg)",
+      flexShrink: 0,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {/* Search */}
+        <div style={{ position: "relative", flex: "1 1 240px", minWidth: 200 }}>
+          <input
+            value={filters.query}
+            onChange={e => onChange({ query: e.target.value })}
+            placeholder="Search goals, notes, linked work…"
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "5px 28px 5px 10px",
+              border: "1px solid var(--border)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: "var(--fs-body)", outline: "none",
+            }}
+            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+            onBlur={e => (e.target.style.borderColor = "var(--border)")}
+          />
+          {filters.query && (
+            <button
+              onClick={() => onChange({ query: "" })}
+              title="Clear query"
+              aria-label="Clear query"
+              style={{
+                position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                width: 18, height: 18,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                padding: 0, border: "none", background: "transparent",
+                color: "var(--text-tertiary)", cursor: "pointer",
+                borderRadius: "var(--radius-sm)",
+              }}
+            >
+              <X size={10} />
+            </button>
+          )}
         </div>
-      ) : groups.map(g => (
-        <WeekColumn key={g.weekStart} weekStart={g.weekStart} goals={g.items} focusedGoalId={focusedGoalId} />
-      ))}
-      <button
-        onClick={handleAddWeek}
-        style={{
-          flexShrink: 0, width: 340,
-          padding: "12px 14px",
-          border: "1px dashed var(--border-strong)",
-          borderRadius: "var(--radius-lg)",
-          background: "transparent",
-          color: "var(--text-tertiary)",
-          fontSize: "var(--fs-meta)", fontWeight: 500,
-          cursor: "pointer",
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
-        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-      >
-        + Add next week
-      </button>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+          {anyActive
+            ? <>{matchingCount} of {totalCount} goal{totalCount === 1 ? "" : "s"}</>
+            : <>{totalCount} goal{totalCount === 1 ? "" : "s"}</>}
+        </span>
+        {anyActive && (
+          <button
+            onClick={onClear}
+            style={{
+              padding: "3px 10px", borderRadius: 100,
+              border: "1px dashed var(--border-strong)",
+              background: "transparent", color: "var(--text-secondary)",
+              fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      {/* Dimension dropdowns. `featureId` is shown read-only because the
+          chip strip in the Roadmap header owns its setter; the other
+          dimensions toggle via this bar. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        {filters.featureId && (
+          <span
+            title="Feature filter — clear via the chip strip above"
+            style={{
+              ...selectStyle(true),
+              display: "inline-flex", alignItems: "center", gap: 4,
+              cursor: "default",
+            }}
+          >
+            Feature: {features.find(f => f.id === filters.featureId)?.title ?? "—"}
+          </span>
+        )}
+        <select
+          value={filters.sliceId ?? ""}
+          onChange={e => onChange({ sliceId: e.target.value || null })}
+          style={selectStyle(filters.sliceId !== null)}
+          aria-label="Filter by linked feature slice"
+        >
+          <option value="">All slices</option>
+          {featureSlices.map(s => (
+            <option key={s.id} value={s.id}>{s.title}</option>
+          ))}
+        </select>
+        <select
+          value={filters.capabilityId ?? ""}
+          onChange={e => onChange({ capabilityId: e.target.value || null })}
+          style={selectStyle(filters.capabilityId !== null)}
+          aria-label="Filter by linked product capability"
+        >
+          <option value="">All capabilities</option>
+          {productCapabilities.map(c => (
+            <option key={c.id} value={c.id}>{c.title}</option>
+          ))}
+        </select>
+        {THEMES_ENABLED && (
+        <select
+          value={filters.themeId ?? ""}
+          onChange={e => onChange({ themeId: e.target.value || null })}
+          style={selectStyle(filters.themeId !== null)}
+          aria-label="Filter by theme"
+        >
+          <option value="">All themes</option>
+          {themes.map(t => (
+            <option key={t.id} value={t.id}>{t.title}</option>
+          ))}
+        </select>
+        )}
+        <select
+          value={filters.releaseId ?? ""}
+          onChange={e => onChange({ releaseId: e.target.value || null })}
+          style={selectStyle(filters.releaseId !== null)}
+          aria-label="Filter by release"
+        >
+          <option value="">All releases</option>
+          {releases.map(r => (
+            <option key={r.id} value={r.id}>{r.title}</option>
+          ))}
+        </select>
+        <select
+          value={filters.goalStatus}
+          onChange={e => onChange({ goalStatus: e.target.value as WeeklyFilterState["goalStatus"] })}
+          style={selectStyle(filters.goalStatus !== "all")}
+          aria-label="Filter by goal status"
+        >
+          <option value="all">Any goal status</option>
+          <option value="planned">Planned</option>
+          <option value="in_progress">In Progress</option>
+          <option value="done">Done</option>
+        </select>
+        <select
+          value={filters.intentStatus}
+          onChange={e => onChange({ intentStatus: e.target.value as WeeklyFilterState["intentStatus"] })}
+          style={selectStyle(filters.intentStatus !== "all")}
+          aria-label="Filter by linked intent status"
+        >
+          <option value="all">Any intent status</option>
+          <option value="backlog">Has intent in Backlog</option>
+          <option value="to_do">Has intent in To do</option>
+          <option value="in_progress">Has intent in In Progress</option>
+          <option value="done">Has intent in Done</option>
+        </select>
+      </div>
     </div>
   );
 }
@@ -402,6 +742,7 @@ function weekLabelFromISO(iso: string): string {
 function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean }) {
   const {
     updateWeeklyGoal, deleteWeeklyGoal, wipItems, features, featureSlices, productCapabilities,
+    releases, themes, toggleThemeGoal,
     toggleGoalIntent, toggleGoalSlice, toggleGoalCapability, setRoute, openWip, setRoadmapFocus,
   } = useStore();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -420,6 +761,18 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
   // them in the Product View via cross-tab focus.
   const linkedSlices = featureSlices.filter(s => goal.linkedSliceIds.includes(s.id));
   const linkedCapabilities = productCapabilities.filter(c => goal.linkedCapabilityIds.includes(c.id));
+
+  // Cross-reference: every release that packages this goal. Display-
+  // only (the linking action lives on the Release card itself).
+  const releaseIdsForGoal = releases
+    .filter(r => r.linkedGoalIds.includes(goal.id))
+    .map(r => r.id);
+  // Theme attachments — themes are overlays, so we both display the
+  // attached themes AND let the user toggle them from the goal card
+  // (themes are quick tags, designed to be easy to add anywhere).
+  const themeIdsForGoal = themes
+    .filter(t => t.linkedGoalIds.includes(goal.id))
+    .map(t => t.id);
 
   return (
     <div
@@ -583,6 +936,22 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
         }
         emptyHint="No intents linked yet."
       />
+
+      {/* Read-only cross-reference: releases that package this goal.
+          Linking happens on the Release card; this row just makes the
+          connection visible from the goal side. */}
+      {releaseIdsForGoal.length > 0 && (
+        <ReleaseRefList releaseIds={releaseIdsForGoal} />
+      )}
+
+      {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
+      {THEMES_ENABLED && (
+        <ThemeRefList
+          themeIds={themeIdsForGoal}
+          onPick={(themeId) => toggleThemeGoal(themeId, goal.id)}
+          pickerSelected={themeIdsForGoal}
+        />
+      )}
 
       {/* Notes — collapsed to a click-to-edit row to keep the card compact. */}
       <div>
@@ -1034,6 +1403,17 @@ function CapabilityPicker({ value, onToggle }: { value: string[]; onToggle: (id:
     subtitle: features.find(f => f.id === c.featureId)?.title,
   }));
   return <PickerPopover label="Link product capability" options={options} value={value} onToggle={onToggle} />;
+}
+// Picker over the entire weekly-goals timeline. Subtitle shows the week
+// label + status so the user picks the right goal without leaving the
+// release card.
+function GoalPicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+  const { weeklyGoals } = useStore();
+  const options = weeklyGoals.map(g => ({
+    id: g.id, label: g.title,
+    subtitle: `${g.weekLabel} · ${g.status === "in_progress" ? "In progress" : g.status === "done" ? "Done" : "Planned"}`,
+  }));
+  return <PickerPopover label="Link weekly goal" options={options} value={value} onToggle={onToggle} />;
 }
 
 // Small "from <Feature>" pill used on linked-slice + linked-capability
@@ -1523,13 +1903,29 @@ function SliceBlock({ slice }: { slice: FeatureSlice }) {
 // slice shows the inclusion table for the parent feature's
 // capabilities — must / should / could / won't, exactly as in the spec.
 
+// Type filter — narrows the search results pane to one object kind.
+// "all" includes everything; "unassigned" is a feature-only sub-filter
+// that pulls just the features with no areaId.
+type ProductSearchKind = "all" | "feature" | "slice" | "capability" | "unassigned";
+
+type ProductSearchHit =
+  | { kind: "area";       id: string; title: string; subtitle?: string }
+  | { kind: "group";      id: string; title: string; subtitle?: string; featureCount: number; areaId: string }
+  | { kind: "feature";    id: string; title: string; subtitle?: string; status: FeatureStatus; unassigned: boolean }
+  | { kind: "slice";      id: string; title: string; subtitle?: string; status: FeatureStatus; featureId: string }
+  | { kind: "capability"; id: string; title: string; subtitle?: string; featureId: string };
+
 function ProductExplorerView({
   selectedFeatureId, onSelectFeature,
 }: {
   selectedFeatureId: string | null;
   onSelectFeature: (id: string | null) => void;
 }) {
-  const { features } = useStore();
+  const {
+    features, featureSlices, productCapabilities, productAreas, featureGroups,
+    themes, releases,
+  } = useStore();
+
   // The selection is lifted into RoadmapPage so cross-tab focus from a
   // goal card can open a specific feature here. On first arrival with
   // no explicit selection, default-select the Auth example so the demo
@@ -1550,38 +1946,350 @@ function ProductExplorerView({
   const selectedId = selectedFeatureId;
   const setSelectedId = onSelectFeature;
 
+  // ── Search + filter state ──────────────────────────────────────────
+  // Lives at the ProductExplorerView level so the tree (when visible)
+  // and the results list share the same query / filter values. Default
+  // is "no filters" → tree is rendered as today; once any filter is
+  // active OR the query has content we switch to the flat result list.
+  const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState<ProductSearchKind>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | FeatureStatus>("all");
+  const [themeFilter, setThemeFilter] = useState<string>("all");      // theme id or "all"
+  const [releaseFilter, setReleaseFilter] = useState<string>("all");  // release id or "all"
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const queryActive   = normalizedQuery.length > 0;
+  const filtersActive =
+    typeFilter !== "all" ||
+    statusFilter !== "all" ||
+    themeFilter !== "all" ||
+    releaseFilter !== "all";
+  const searchActive  = queryActive || filtersActive;
+
+  // Resolve the theme/release once so the matcher closures don't pay
+  // the lookup cost per item.
+  const activeTheme   = themes.find(t => t.id === themeFilter) ?? null;
+  const activeRelease = releases.find(r => r.id === releaseFilter) ?? null;
+
+  // Match helpers — case-insensitive substring match across title +
+  // optional description. The empty query matches everything.
+  const matchesQuery = (title: string, desc?: string) => {
+    if (!queryActive) return true;
+    const t = title.toLowerCase();
+    if (t.includes(normalizedQuery)) return true;
+    if (desc && desc.toLowerCase().includes(normalizedQuery)) return true;
+    return false;
+  };
+  const matchesStatus = (status: FeatureStatus | undefined): boolean => {
+    if (statusFilter === "all") return true;
+    return status === statusFilter;
+  };
+  // Theme/release narrow Features / Slices / Capabilities. Areas and
+  // Groups have no direct theme/release edge, so they are excluded
+  // whenever those filters are active.
+  const matchesTheme = (kind: ProductSearchHit["kind"], id: string): boolean => {
+    if (!activeTheme) return true;
+    if (kind === "feature")    return activeTheme.linkedFeatureIds.includes(id);
+    if (kind === "slice")      return activeTheme.linkedSliceIds.includes(id);
+    if (kind === "capability") return activeTheme.linkedCapabilityIds.includes(id);
+    return false;
+  };
+  const matchesRelease = (kind: ProductSearchHit["kind"], id: string): boolean => {
+    if (!activeRelease) return true;
+    if (kind === "feature")    return activeRelease.linkedFeatureIds.includes(id);
+    if (kind === "slice")      return activeRelease.linkedSliceIds.includes(id);
+    if (kind === "capability") return activeRelease.linkedCapabilityIds.includes(id);
+    return false;
+  };
+
+  // ── Build the flat result list when search is active. ──────────────
+  // We always compute every hit so the count chips on the type pills
+  // ("Features · 4") reflect the unfiltered-by-type view.
+  const results: ProductSearchHit[] = useMemo(() => {
+    if (!searchActive) return [];
+    const all: ProductSearchHit[] = [];
+
+    // Areas + Groups — title/description match only; suppressed when a
+    // type filter / status / theme / release is active.
+    const includeContainers =
+      (typeFilter === "all") &&
+      statusFilter === "all" && themeFilter === "all" && releaseFilter === "all";
+    if (includeContainers) {
+      productAreas.forEach(a => {
+        if (matchesQuery(a.title, a.description)) {
+          all.push({ kind: "area", id: a.id, title: a.title, subtitle: a.description });
+        }
+      });
+      featureGroups.forEach(g => {
+        if (matchesQuery(g.title)) {
+          const area = productAreas.find(a => a.id === g.areaId);
+          all.push({
+            kind: "group", id: g.id, title: g.title,
+            subtitle: area?.title,
+            featureCount: features.filter(f => f.featureGroupId === g.id).length,
+            areaId: g.areaId,
+          });
+        }
+      });
+    }
+
+    // Features — every type filter except slice/capability passes.
+    if (typeFilter === "all" || typeFilter === "feature" || typeFilter === "unassigned") {
+      features.forEach(f => {
+        if (typeFilter === "unassigned" && f.areaId) return;
+        if (!matchesQuery(f.title, f.description)) return;
+        if (!matchesStatus(f.status)) return;
+        if (!matchesTheme("feature", f.id)) return;
+        if (!matchesRelease("feature", f.id)) return;
+        const area = productAreas.find(a => a.id === f.areaId);
+        const group = featureGroups.find(g => g.id === f.featureGroupId);
+        const subtitleParts = [
+          area?.title ?? (f.areaId ? "" : "Unassigned features"),
+          group?.title,
+        ].filter(Boolean);
+        all.push({
+          kind: "feature", id: f.id, title: f.title,
+          subtitle: subtitleParts.join(" · ") || undefined,
+          status: f.status,
+          unassigned: !f.areaId,
+        });
+      });
+    }
+
+    // Slices.
+    if (typeFilter === "all" || typeFilter === "slice") {
+      featureSlices.forEach(s => {
+        if (!matchesQuery(s.title, s.description)) return;
+        if (!matchesStatus(s.status)) return;
+        if (!matchesTheme("slice", s.id)) return;
+        if (!matchesRelease("slice", s.id)) return;
+        const parent = features.find(f => f.id === s.featureId);
+        all.push({
+          kind: "slice", id: s.id, title: s.title,
+          subtitle: parent?.title,
+          status: s.status, featureId: s.featureId,
+        });
+      });
+    }
+
+    // Capabilities — no status field, so status filter excludes them.
+    if ((typeFilter === "all" || typeFilter === "capability") && statusFilter === "all") {
+      productCapabilities.forEach(c => {
+        if (!matchesQuery(c.title)) return;
+        if (!matchesTheme("capability", c.id)) return;
+        if (!matchesRelease("capability", c.id)) return;
+        const parent = features.find(f => f.id === c.featureId);
+        all.push({
+          kind: "capability", id: c.id, title: c.title,
+          subtitle: parent?.title,
+          featureId: c.featureId,
+        });
+      });
+    }
+
+    return all;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchActive, queryActive, normalizedQuery, typeFilter, statusFilter, themeFilter, releaseFilter,
+       features, featureSlices, productCapabilities, productAreas, featureGroups,
+       activeTheme, activeRelease]);
+
+  // Counts for the type-filter pills. Computed from the same source
+  // arrays but ignoring the type filter so the pill counts stay stable
+  // as the user toggles between types.
+  const countsByKind = useMemo(() => {
+    const c = { feature: 0, slice: 0, capability: 0, unassigned: 0 };
+    features.forEach(f => {
+      if (!matchesQuery(f.title, f.description)) return;
+      if (!matchesStatus(f.status)) return;
+      if (!matchesTheme("feature", f.id)) return;
+      if (!matchesRelease("feature", f.id)) return;
+      c.feature++;
+      if (!f.areaId) c.unassigned++;
+    });
+    featureSlices.forEach(s => {
+      if (!matchesQuery(s.title, s.description)) return;
+      if (!matchesStatus(s.status)) return;
+      if (!matchesTheme("slice", s.id)) return;
+      if (!matchesRelease("slice", s.id)) return;
+      c.slice++;
+    });
+    if (statusFilter === "all") {
+      productCapabilities.forEach(cap => {
+        if (!matchesQuery(cap.title)) return;
+        if (!matchesTheme("capability", cap.id)) return;
+        if (!matchesRelease("capability", cap.id)) return;
+        c.capability++;
+      });
+    }
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryActive, normalizedQuery, statusFilter, themeFilter, releaseFilter,
+       features, featureSlices, productCapabilities, activeTheme, activeRelease]);
+
+  // Click handler — search result rows resolve to a featureId in the
+  // detail pane. For container-shaped hits (area/group) we open the
+  // first feature inside that container if any exists; otherwise the
+  // pane stays as-is (the container itself isn't editable in the
+  // detail view today).
+  const handleHitClick = (hit: ProductSearchHit) => {
+    if (hit.kind === "feature") {
+      setSelectedId(hit.id);
+    } else if (hit.kind === "slice") {
+      setSelectedId(hit.featureId);
+    } else if (hit.kind === "capability") {
+      setSelectedId(hit.featureId);
+    } else if (hit.kind === "area") {
+      const first = features.find(f => f.areaId === hit.id);
+      if (first) setSelectedId(first.id);
+    } else if (hit.kind === "group") {
+      const first = features.find(f => f.featureGroupId === hit.id);
+      if (first) setSelectedId(first.id);
+    }
+  };
+
+  const clearAll = () => {
+    setQuery("");
+    setTypeFilter("all");
+    setStatusFilter("all");
+    setThemeFilter("all");
+    setReleaseFilter("all");
+  };
+
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
       {/* Left rail */}
       <aside style={{
-        width: 320, flexShrink: 0,
+        width: 340, flexShrink: 0,
         borderRight: "1px solid var(--border)",
         background: "var(--bg)",
         overflowY: "auto",
         padding: "12px 12px 20px",
+        display: "flex", flexDirection: "column", gap: 10,
       }}>
-        <ProductTree
-          selectedId={selectedId}
-          onSelect={(id) => setSelectedId(id)}
-        />
-        <button
-          onClick={() => {
-            const title = window.prompt("New capability area name");
-            if (title?.trim()) {
-              // Reuse existing createProductArea action.
-              // Stored in the seed file already; we don't need to do anything more.
-              // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-              ((typeof window !== "undefined") && void title);
-            }
-          }}
-          style={{ display: "none" }} // Hidden — area creation lives inside ProductTree per-area inline buttons.
-        />
-        <div style={{
-          marginTop: 12, fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5,
-        }}>
-          Use the + buttons to add groups and features. Click a feature to edit it on the right.
+        {/* Search input */}
+        <div style={{ position: "relative" }}>
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search features, slices, capabilities…"
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "6px 28px 6px 10px",
+              border: "1px solid var(--border)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: "var(--fs-body)", outline: "none",
+            }}
+            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+            onBlur={e => (e.target.style.borderColor = "var(--border)")}
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              title="Clear search"
+              aria-label="Clear search"
+              style={{
+                position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                width: 18, height: 18,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                padding: 0, border: "none", background: "transparent",
+                color: "var(--text-tertiary)", cursor: "pointer",
+                borderRadius: "var(--radius-sm)",
+              }}
+            >
+              <X size={10} />
+            </button>
+          )}
         </div>
-        <NewAreaButton />
+
+        {/* Type filter pills */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {([
+            { id: "all",         label: "All",         count: null as number | null },
+            { id: "feature",     label: "Features",    count: countsByKind.feature },
+            { id: "slice",       label: "Slices",      count: countsByKind.slice },
+            { id: "capability",  label: "Capabilities",count: countsByKind.capability },
+            { id: "unassigned",  label: "Unassigned",  count: countsByKind.unassigned },
+          ] as { id: ProductSearchKind; label: string; count: number | null }[]).map(p => {
+            const active = typeFilter === p.id;
+            return (
+              <button
+                key={p.id}
+                onClick={() => setTypeFilter(p.id)}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  padding: "2px 8px",
+                  border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  borderRadius: 100,
+                  background: active ? "var(--accent-soft)" : "var(--bg)",
+                  color: active ? "var(--accent)" : "var(--text-secondary)",
+                  fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+                }}
+              >
+                {p.label}
+                {p.count !== null && (
+                  <span style={{ fontSize: 10, color: active ? "var(--accent)" : "var(--text-tertiary)" }}>
+                    · {p.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Secondary filter dropdowns — kept compact + collapsible to
+            avoid noise. They sit under a small "Filters" disclosure that
+            only opens when the user needs them. */}
+        <ProductFilterDropdowns
+          statusFilter={statusFilter}
+          themeFilter={themeFilter}
+          releaseFilter={releaseFilter}
+          onStatusChange={setStatusFilter}
+          onThemeChange={setThemeFilter}
+          onReleaseChange={setReleaseFilter}
+        />
+
+        {/* Clear-all chip — only when something is active. */}
+        {searchActive && (
+          <button
+            onClick={clearAll}
+            style={{
+              alignSelf: "flex-start",
+              padding: "2px 10px", borderRadius: 100,
+              border: "1px dashed var(--border-strong)",
+              background: "transparent", color: "var(--text-secondary)",
+              fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+          >
+            Clear search + filters
+          </button>
+        )}
+
+        {/* Body: either the hierarchy tree (default) or the flat search
+            result list (when something is active). The tree is never
+            removed from the codebase — clearing returns the user to it
+            instantly. */}
+        {searchActive ? (
+          <ProductSearchResultsList
+            results={results}
+            selectedFeatureId={selectedId}
+            onHitClick={handleHitClick}
+          />
+        ) : (
+          <>
+            <ProductTree
+              selectedId={selectedId}
+              onSelect={(id) => setSelectedId(id)}
+            />
+            <div style={{
+              marginTop: 4, fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5,
+            }}>
+              Use the + buttons to add groups and features. Click a feature to edit it on the right.
+            </div>
+            <NewAreaButton />
+          </>
+        )}
       </aside>
 
       {/* Right detail */}
@@ -1602,6 +2310,205 @@ function ProductExplorerView({
       </main>
     </div>
   );
+}
+
+// ── ProductFilterDropdowns ──────────────────────────────────────────────
+// Compact secondary-filter strip with Status / Theme / Release. Stays
+// always-visible (no disclosure) to keep clicks short; the dropdowns
+// themselves are minimal native selects so the prototype doesn't have
+// to maintain bespoke popover state for each.
+function ProductFilterDropdowns({
+  statusFilter, themeFilter, releaseFilter,
+  onStatusChange, onThemeChange, onReleaseChange,
+}: {
+  statusFilter: "all" | FeatureStatus;
+  themeFilter: string;
+  releaseFilter: string;
+  onStatusChange: (s: "all" | FeatureStatus) => void;
+  onThemeChange: (id: string) => void;
+  onReleaseChange: (id: string) => void;
+}) {
+  const { themes, releases } = useStore();
+  const selectStyle = (active: boolean): React.CSSProperties => ({
+    flex: 1, minWidth: 0,
+    padding: "3px 6px",
+    border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+    borderRadius: "var(--radius)",
+    background: active ? "var(--accent-soft)" : "var(--bg)",
+    color: active ? "var(--accent)" : "var(--text)",
+    fontSize: 11, outline: "none",
+  });
+  return (
+    <div style={{ display: "flex", gap: 4 }}>
+      <select
+        value={statusFilter}
+        onChange={e => onStatusChange(e.target.value as "all" | FeatureStatus)}
+        style={selectStyle(statusFilter !== "all")}
+        aria-label="Filter by status"
+      >
+        <option value="all">All statuses</option>
+        <option value="not_started">Not started</option>
+        <option value="planned">Planned</option>
+        <option value="in_progress">In Progress</option>
+        <option value="done">Done</option>
+      </select>
+      {THEMES_ENABLED && (
+      <select
+        value={themeFilter}
+        onChange={e => onThemeChange(e.target.value)}
+        style={selectStyle(themeFilter !== "all")}
+        aria-label="Filter by theme"
+      >
+        <option value="all">All themes</option>
+        {themes.map(t => (
+          <option key={t.id} value={t.id}>{t.title}</option>
+        ))}
+      </select>
+      )}
+      <select
+        value={releaseFilter}
+        onChange={e => onReleaseChange(e.target.value)}
+        style={selectStyle(releaseFilter !== "all")}
+        aria-label="Filter by release"
+      >
+        <option value="all">All releases</option>
+        {releases.map(r => (
+          <option key={r.id} value={r.id}>{r.title}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// ── ProductSearchResultsList ────────────────────────────────────────────
+// Flat result list shown in place of the tree when search/filter is
+// active. Each row carries a colored kind chip + the title + a small
+// subtitle hint (parent / location). Unassigned features get a yellow
+// "UNASSIGNED" badge so the user can spot them at a glance — clicking
+// the row opens the feature in the detail pane, where the existing
+// "Assign to hierarchy" banner takes over.
+function ProductSearchResultsList({
+  results, selectedFeatureId, onHitClick,
+}: {
+  results: ProductSearchHit[];
+  selectedFeatureId: string | null;
+  onHitClick: (hit: ProductSearchHit) => void;
+}) {
+  if (results.length === 0) {
+    return (
+      <div style={{
+        padding: "16px 8px", fontSize: 11, color: "var(--text-tertiary)",
+        lineHeight: 1.5, textAlign: "center",
+      }}>
+        No results. Adjust the query or clear filters to keep browsing the tree.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+        textTransform: "uppercase", color: "var(--text-tertiary)",
+        margin: "2px 4px 4px",
+      }}>
+        Results · {results.length}
+      </div>
+      {results.map(hit => {
+        const isSelectedFeature =
+          (hit.kind === "feature" && hit.id === selectedFeatureId) ||
+          (hit.kind === "slice" && hit.featureId === selectedFeatureId) ||
+          (hit.kind === "capability" && hit.featureId === selectedFeatureId);
+        return (
+          <button
+            key={`${hit.kind}-${hit.id}`}
+            onClick={() => onHitClick(hit)}
+            style={{
+              display: "flex", alignItems: "flex-start", gap: 6,
+              width: "100%", padding: "5px 8px",
+              border: "none", borderRadius: "var(--radius)",
+              background: isSelectedFeature ? "var(--accent-soft)" : "transparent",
+              textAlign: "left", cursor: "pointer",
+            }}
+            onMouseEnter={e => { if (!isSelectedFeature) e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={e => { if (!isSelectedFeature) e.currentTarget.style.background = "transparent"; }}
+            title={hit.subtitle ? `${hit.title} — ${hit.subtitle}` : hit.title}
+          >
+            <span style={productHitKindPill(hit.kind)}>{productHitKindLabel(hit.kind)}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+              }}>
+                <span style={{
+                  fontSize: "var(--fs-body)",
+                  color: isSelectedFeature ? "var(--accent)" : "var(--text)",
+                  fontWeight: isSelectedFeature ? 600 : 400,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {hit.title}
+                </span>
+                {hit.kind === "feature" && hit.unassigned && (
+                  <span style={{
+                    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                    color: "#b45309",
+                    background: "rgba(245,158,11,0.12)",
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    borderRadius: 100, padding: "0 6px",
+                  }}>
+                    UNASSIGNED
+                  </span>
+                )}
+              </div>
+              {hit.subtitle && (
+                <div style={{
+                  fontSize: 10.5, color: "var(--text-tertiary)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  marginTop: 1,
+                }}>
+                  {hit.subtitle}
+                </div>
+              )}
+            </div>
+            {"status" in hit && (
+              <span style={pillStyle(hit.status)}>
+                {FEATURE_STATUS_LABEL[hit.status]}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function productHitKindLabel(k: ProductSearchHit["kind"]): string {
+  switch (k) {
+    case "area":       return "Area";
+    case "group":      return "Group";
+    case "feature":    return "Feature";
+    case "slice":      return "Slice";
+    case "capability": return "Capability";
+  }
+}
+
+function productHitKindPill(k: ProductSearchHit["kind"]): React.CSSProperties {
+  const palette: Record<ProductSearchHit["kind"], { bg: string; fg: string; bd: string }> = {
+    area:       { bg: "rgba(99,102,241,0.10)", fg: "#4338ca", bd: "rgba(99,102,241,0.45)" },
+    group:      { bg: "rgba(14,165,233,0.10)", fg: "#0369a1", bd: "rgba(14,165,233,0.45)" },
+    feature:    { bg: "rgba(59,130,246,0.12)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.45)" },
+    slice:      { bg: "rgba(168,85,247,0.12)", fg: "#7e22ce", bd: "rgba(168,85,247,0.45)" },
+    capability: { bg: "rgba(20,184,166,0.12)", fg: "#0f766e", bd: "rgba(20,184,166,0.45)" },
+  };
+  const p = palette[k];
+  return {
+    display: "inline-flex", alignItems: "center",
+    padding: "1px 6px", borderRadius: 100,
+    background: p.bg, color: p.fg,
+    border: `1px solid ${p.bd}`,
+    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+    marginTop: 1,
+  };
 }
 
 function NewAreaButton() {
@@ -2304,10 +3211,10 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
   const {
     features, productCapabilities, featureSlices,
     productAreas, featureGroups,
-    weeklyGoals, wipItems,
+    weeklyGoals, wipItems, themes,
     updateFeature, deleteFeature,
     createProductCapability, updateProductCapability, deleteProductCapability,
-    createFeatureSlice,
+    createFeatureSlice, toggleThemeFeature,
     setRoute, openWip,
   } = useStore();
 
@@ -2333,6 +3240,9 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
   const group = featureGroups.find(g => g.id === feature.featureGroupId);
   const linkedGoals = weeklyGoals.filter(g => g.linkedFeatureIds.includes(feature.id));
   const linkedIntents = wipItems.filter(w => w.type === "intent" && feature.linkedIntentIds.includes(w.id));
+  const themeIdsForFeature = themes
+    .filter(t => t.linkedFeatureIds.includes(feature.id))
+    .map(t => t.id);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -2341,6 +3251,15 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
         {area?.title ?? "Unassigned features"}
         {group && <> · {group.title}</>}
       </div>
+
+      {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
+      {THEMES_ENABLED && (
+        <ThemeRefList
+          themeIds={themeIdsForFeature}
+          onPick={(themeId) => toggleThemeFeature(themeId, feature.id)}
+          pickerSelected={themeIdsForFeature}
+        />
+      )}
 
       {/* Unassigned banner — shown when the feature has no area yet.
           Mirrors the rail's Assign button so the user can file the
@@ -2648,10 +3567,18 @@ function SliceCard({
   slice: FeatureSlice;
   capabilities: ProductCapability[];
 }) {
-  const { updateFeatureSlice, deleteFeatureSlice, setSliceCapabilityStatus } = useStore();
+  const { updateFeatureSlice, deleteFeatureSlice, setSliceCapabilityStatus, releases, themes, toggleThemeSlice } = useStore();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(slice.title);
   const [descDraft, setDescDraft] = useState(slice.description ?? "");
+  // Cross-reference: every release that packages this slice.
+  const releaseIdsForSlice = releases
+    .filter(r => r.linkedSliceIds.includes(slice.id))
+    .map(r => r.id);
+  // Themes tagging this slice — overlay, editable inline.
+  const themeIdsForSlice = themes
+    .filter(t => t.linkedSliceIds.includes(slice.id))
+    .map(t => t.id);
 
   return (
     <div style={{
@@ -2748,6 +3675,20 @@ function SliceCard({
           </div>
         )}
       </div>
+
+      {/* Read-only cross-reference: releases that include this slice. */}
+      {releaseIdsForSlice.length > 0 && (
+        <ReleaseRefList releaseIds={releaseIdsForSlice} />
+      )}
+
+      {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
+      {THEMES_ENABLED && (
+        <ThemeRefList
+          themeIds={themeIdsForSlice}
+          onPick={(themeId) => toggleThemeSlice(themeId, slice.id)}
+          pickerSelected={themeIdsForSlice}
+        />
+      )}
     </div>
   );
 }
@@ -2820,3 +3761,1101 @@ function SliceCapabilityPicker({
 
 // Suppress unused-import warnings for icons we may want later.
 void Task; void Intent; void userById;
+
+// ── ReleasesView ──────────────────────────────────────────────────────────
+// Lightweight scope-packaging surface. A release is NOT a parent of any
+// product object — it just collects pointers. Each ReleaseCard reads the
+// release once and lets the user toggle goals / features / slices /
+// capabilities in and out. Clicking a linked slice or feature jumps to
+// the Product View focused on the parent feature (via setRoadmapFocus,
+// same mechanism used by the goal cards).
+//
+// Cross-references (so the Release tab isn't a one-way street):
+//   • WeeklyGoalCard renders "Included in releases: …" if any release
+//     packages it.
+//   • SliceCard in FeatureDetailPane renders "Included in releases: …"
+//     for the same reason.
+
+const RELEASE_STATUS_LABEL: Record<ReleaseStatus, string> = {
+  planned:     "Planned",
+  in_progress: "In Progress",
+  released:    "Released",
+};
+
+function releasePillStyle(status: ReleaseStatus): React.CSSProperties {
+  const palette: Record<ReleaseStatus, { bg: string; color: string; border: string }> = {
+    planned:     { bg: "rgba(59,130,246,0.10)",  color: "#1d4ed8", border: "rgba(59,130,246,0.40)" },
+    in_progress: { bg: "rgba(245,158,11,0.12)",  color: "#b45309", border: "rgba(245,158,11,0.45)" },
+    released:    { bg: "rgba(34,197,94,0.12)",   color: "#15803d", border: "rgba(34,197,94,0.45)" },
+  };
+  const p = palette[status];
+  return {
+    display: "inline-flex", alignItems: "center", gap: 3,
+    padding: "1px 8px", borderRadius: 100,
+    background: p.bg, color: p.color,
+    border: `1px solid ${p.border}`,
+    fontSize: 10.5, fontWeight: 600, letterSpacing: 0.2,
+    cursor: "pointer", whiteSpace: "nowrap",
+  };
+}
+
+function ReleasesView() {
+  const { releases, createRelease } = useStore();
+  // Sort: in-progress first, then planned, then released, alphabetical
+  // inside each bucket. Keeps active scope at the top.
+  const sorted = useMemo(() => {
+    const order: Record<ReleaseStatus, number> = { in_progress: 0, planned: 1, released: 2 };
+    return releases.slice().sort((a, b) => {
+      const d = order[a.status] - order[b.status];
+      if (d !== 0) return d;
+      return a.title.localeCompare(b.title);
+    });
+  }, [releases]);
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 12,
+      padding: 16, minHeight: "100%",
+      maxWidth: 920, margin: "0 auto",
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+      }}>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
+          Releases package the goals, features, slices, and capabilities you plan to ship together. They never own anything — the same target can sit in multiple releases.
+        </span>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={() => createRelease({ title: "Untitled release" })}
+          style={{
+            padding: "5px 12px",
+            background: "var(--accent)",
+            color: "white",
+            border: "none", borderRadius: "var(--radius)",
+            fontSize: "var(--fs-meta)", fontWeight: 600,
+            cursor: "pointer", whiteSpace: "nowrap",
+          }}
+        >
+          + New release
+        </button>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div style={{
+          margin: "60px auto", maxWidth: 380, textAlign: "center",
+          fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+        }}>
+          No releases yet. Use <strong style={{ color: "var(--text)" }}>+ New release</strong> to package a set of goals / features / slices / capabilities you plan to ship together.
+        </div>
+      ) : (
+        sorted.map(r => <ReleaseCard key={r.id} release={r} />)
+      )}
+    </div>
+  );
+}
+
+function ReleaseCard({ release }: { release: Release }) {
+  const {
+    updateRelease, deleteRelease,
+    weeklyGoals, features, featureSlices, productCapabilities,
+    themes, toggleThemeRelease,
+    toggleReleaseGoal, toggleReleaseFeature, toggleReleaseSlice, toggleReleaseCapability,
+    setRoadmapFocus,
+  } = useStore();
+  const themeIdsForRelease = themes
+    .filter(t => t.linkedReleaseIds.includes(release.id))
+    .map(t => t.id);
+
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(release.title);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [descDraft, setDescDraft] = useState(release.description ?? "");
+  const [editingDates, setEditingDates] = useState(false);
+  const [startDraft, setStartDraft] = useState(release.targetStart?.slice(0, 10) ?? "");
+  const [endDraft,   setEndDraft]   = useState(release.targetEnd?.slice(0, 10) ?? "");
+
+  React.useEffect(() => {
+    setTitleDraft(release.title);
+    setDescDraft(release.description ?? "");
+    setStartDraft(release.targetStart?.slice(0, 10) ?? "");
+    setEndDraft(release.targetEnd?.slice(0, 10) ?? "");
+  }, [release.id, release.title, release.description, release.targetStart, release.targetEnd]);
+
+  const linkedGoals = weeklyGoals.filter(g => release.linkedGoalIds.includes(g.id));
+  const linkedFeatures = features.filter(f => release.linkedFeatureIds.includes(f.id));
+  const linkedSlices = featureSlices.filter(s => release.linkedSliceIds.includes(s.id));
+  const linkedCapabilities = productCapabilities.filter(c => release.linkedCapabilityIds.includes(c.id));
+
+  const dateLabel = formatReleaseTargetLabel(release.targetStart, release.targetEnd);
+
+  return (
+    <div
+      data-release-id={release.id}
+      style={{
+        background: "var(--bg)",
+        borderTop:    "1px solid var(--border)",
+        borderRight:  "1px solid var(--border)",
+        borderBottom: "1px solid var(--border)",
+        borderLeft: `3px solid ${release.status === "released" ? "var(--status-accepted)" : release.status === "in_progress" ? "#f59e0b" : "var(--accent)"}`,
+        borderRadius: "var(--radius-lg)",
+        padding: "14px 16px",
+        display: "flex", flexDirection: "column", gap: 12,
+      }}
+    >
+      {/* Title + status + delete */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {editingTitle ? (
+          <input
+            autoFocus
+            value={titleDraft}
+            onChange={e => setTitleDraft(e.target.value)}
+            onBlur={() => { updateRelease(release.id, { title: titleDraft.trim() || release.title }); setEditingTitle(false); }}
+            onKeyDown={e => {
+              if (e.key === "Enter") { updateRelease(release.id, { title: titleDraft.trim() || release.title }); setEditingTitle(false); }
+              else if (e.key === "Escape") { setTitleDraft(release.title); setEditingTitle(false); }
+            }}
+            style={{
+              flex: 1, fontSize: 16, fontWeight: 600, color: "var(--text)",
+              border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+              padding: "4px 8px", background: "var(--bg)", outline: "none",
+            }}
+          />
+        ) : (
+          <h3
+            onClick={() => { setTitleDraft(release.title); setEditingTitle(true); }}
+            style={{ flex: 1, margin: 0, fontSize: 16, fontWeight: 600, color: "var(--text)", cursor: "text", lineHeight: 1.3 }}
+            title="Click to rename"
+          >
+            {release.title}
+          </h3>
+        )}
+        <ReleaseStatusPicker
+          status={release.status}
+          onChange={(s) => updateRelease(release.id, { status: s })}
+        />
+        <button
+          onClick={() => { if (window.confirm(`Delete release "${release.title}"? Linked objects stay where they are.`)) deleteRelease(release.id); }}
+          aria-label="Delete release"
+          title="Delete release"
+          style={{
+            padding: 4, color: "var(--text-tertiary)",
+            background: "transparent", border: "none", cursor: "pointer",
+            borderRadius: "var(--radius-sm)",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+        >
+          <X size={11} />
+        </button>
+      </div>
+
+      {/* Description — click to edit, compact when empty */}
+      <div>
+        {editingDesc ? (
+          <textarea
+            autoFocus
+            value={descDraft}
+            onChange={e => setDescDraft(e.target.value)}
+            onBlur={() => { updateRelease(release.id, { description: descDraft }); setEditingDesc(false); }}
+            rows={2}
+            placeholder="Short description (optional)…"
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "6px 9px",
+              border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
+              resize: "vertical",
+            }}
+          />
+        ) : release.description ? (
+          <button
+            onClick={() => { setDescDraft(release.description ?? ""); setEditingDesc(true); }}
+            style={{
+              width: "100%", textAlign: "left",
+              padding: "6px 9px", border: "1px solid var(--border)",
+              borderRadius: "var(--radius)", background: "var(--bg-sunken)",
+              color: "var(--text-secondary)", fontSize: "var(--fs-body)", lineHeight: 1.5,
+              cursor: "text",
+            }}
+            title="Click to edit description"
+          >
+            {release.description}
+          </button>
+        ) : (
+          <button
+            onClick={() => { setDescDraft(""); setEditingDesc(true); }}
+            style={{
+              padding: "2px 4px", fontSize: 11, color: "var(--text-tertiary)",
+              background: "transparent", border: "none", cursor: "pointer",
+            }}
+          >
+            + Add description
+          </button>
+        )}
+      </div>
+
+      {/* Target date / range — click to edit. We treat both inputs as
+          optional so the user can ship a single target or a range. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+          Target
+        </span>
+        {editingDates ? (
+          <>
+            <input
+              type="date"
+              value={startDraft}
+              onChange={e => setStartDraft(e.target.value)}
+              style={dateInputStyle()}
+            />
+            <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>—</span>
+            <input
+              type="date"
+              value={endDraft}
+              onChange={e => setEndDraft(e.target.value)}
+              style={dateInputStyle()}
+            />
+            <button
+              onClick={() => {
+                updateRelease(release.id, {
+                  targetStart: startDraft ? new Date(startDraft).toISOString() : undefined,
+                  targetEnd:   endDraft   ? new Date(endDraft).toISOString()   : undefined,
+                });
+                setEditingDates(false);
+              }}
+              style={{
+                padding: "3px 10px", borderRadius: "var(--radius)",
+                background: "var(--accent)", color: "white",
+                border: "none", fontSize: 11, fontWeight: 500, cursor: "pointer",
+              }}
+            >Save</button>
+            <button
+              onClick={() => {
+                setStartDraft(release.targetStart?.slice(0, 10) ?? "");
+                setEndDraft(release.targetEnd?.slice(0, 10) ?? "");
+                setEditingDates(false);
+              }}
+              style={{
+                padding: "3px 8px", borderRadius: "var(--radius)",
+                background: "transparent", color: "var(--text-secondary)",
+                border: "1px solid var(--border)", fontSize: 11, cursor: "pointer",
+              }}
+            >Cancel</button>
+          </>
+        ) : (
+          <button
+            onClick={() => setEditingDates(true)}
+            style={{
+              padding: "2px 8px", borderRadius: "var(--radius)",
+              background: "transparent",
+              color: dateLabel ? "var(--text-secondary)" : "var(--text-tertiary)",
+              border: "1px dashed var(--border-strong)",
+              fontSize: 11, cursor: "pointer", whiteSpace: "nowrap",
+            }}
+            title="Click to set a target date or range"
+          >
+            {dateLabel ?? "Set target date or range"}
+          </button>
+        )}
+      </div>
+
+      {/* Linked goals */}
+      <LinkedSection
+        title="Linked goals"
+        items={linkedGoals.map(g => ({
+          id: g.id, label: g.title,
+          right: <span style={subtleParentPill()}>{g.weekLabel}</span>,
+          onOpen: () => setRoadmapFocus({ tab: "weekly", goalId: g.id }),
+        }))}
+        addPicker={
+          <GoalPicker
+            value={release.linkedGoalIds}
+            onToggle={(id) => toggleReleaseGoal(release.id, id)}
+          />
+        }
+        emptyHint="No goals linked yet."
+      />
+
+      {/* Linked features */}
+      <LinkedSection
+        title="Linked features"
+        items={linkedFeatures.map(f => ({
+          id: f.id, label: f.title,
+          onOpen: () => setRoadmapFocus({ tab: "product", featureId: f.id }),
+        }))}
+        addPicker={
+          <FeaturePicker
+            value={release.linkedFeatureIds}
+            onToggle={(id) => toggleReleaseFeature(release.id, id)}
+          />
+        }
+        emptyHint="No features linked yet."
+      />
+
+      {/* Linked feature slices */}
+      <LinkedSection
+        title="Linked feature slices"
+        items={linkedSlices.map(s => {
+          const parent = features.find(f => f.id === s.featureId);
+          return {
+            id: s.id, label: s.title,
+            right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+            onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
+          };
+        })}
+        addPicker={
+          <SlicePicker
+            value={release.linkedSliceIds}
+            onToggle={(id) => toggleReleaseSlice(release.id, id)}
+          />
+        }
+        emptyHint="No feature slices linked yet."
+      />
+
+      {/* Linked capabilities */}
+      <LinkedSection
+        title="Linked product capabilities"
+        items={linkedCapabilities.map(c => {
+          const parent = features.find(f => f.id === c.featureId);
+          return {
+            id: c.id, label: c.title,
+            right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+            onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
+          };
+        })}
+        addPicker={
+          <CapabilityPicker
+            value={release.linkedCapabilityIds}
+            onToggle={(id) => toggleReleaseCapability(release.id, id)}
+          />
+        }
+        emptyHint="No product capabilities linked yet."
+      />
+
+      {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
+      {THEMES_ENABLED && (
+        <ThemeRefList
+          themeIds={themeIdsForRelease}
+          onPick={(themeId) => toggleThemeRelease(themeId, release.id)}
+          pickerSelected={themeIdsForRelease}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReleaseStatusPicker({
+  status, onChange,
+}: {
+  status: ReleaseStatus;
+  onChange: (s: ReleaseStatus) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button onClick={() => setOpen(o => !o)} style={releasePillStyle(status)}>
+        {RELEASE_STATUS_LABEL[status]} <ChevronDown size={9} />
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+          width: 150, background: "var(--bg)",
+          border: "1px solid var(--border)", borderRadius: "var(--radius-lg)",
+          boxShadow: "var(--shadow-lg)", overflow: "hidden",
+        }}>
+          {(["planned", "in_progress", "released"] as ReleaseStatus[]).map(s => (
+            <button
+              key={s}
+              onClick={() => { onChange(s); setOpen(false); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                width: "100%", padding: "6px 10px", textAlign: "left",
+                background: s === status ? "var(--bg-sunken)" : "transparent",
+                border: "none", cursor: "pointer",
+                fontSize: "var(--fs-body)", color: "var(--text)",
+              }}
+              onMouseEnter={e => { if (s !== status) e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={e => { if (s !== status) e.currentTarget.style.background = "transparent"; }}
+            >
+              <span style={releasePillStyle(s)}>{RELEASE_STATUS_LABEL[s]}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function dateInputStyle(): React.CSSProperties {
+  return {
+    padding: "3px 6px",
+    border: "1px solid var(--border)", borderRadius: "var(--radius)",
+    background: "var(--bg)", color: "var(--text)",
+    fontSize: 11, outline: "none",
+  };
+}
+
+// "Aug 5, 2026" / "Aug 5 — Aug 19, 2026" / null when both empty.
+function formatReleaseTargetLabel(startISO?: string, endISO?: string): string | null {
+  const fmt = (iso: string) => {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  };
+  if (startISO && endISO) {
+    const startShort = new Date(startISO).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `${startShort} — ${fmt(endISO)}`;
+  }
+  if (startISO) return `From ${fmt(startISO)}`;
+  if (endISO)   return `By ${fmt(endISO)}`;
+  return null;
+}
+
+// ── Cross-references: "Included in releases" badges ────────────────────
+// Read-only helper used on Weekly Goal cards + Slice cards. Each pill is
+// clickable and jumps to the Releases tab (we don't yet support
+// focused-release scroll, but landing on the tab makes the package
+// visible). Keeps the cross-reference one component / one import.
+
+function ReleaseRefList({
+  releaseIds,
+}: {
+  releaseIds: string[];
+}) {
+  const { releases } = useStore();
+  // RoadmapPage owns the tab toggle, so we re-use setRoadmapFocus with
+  // a "releases" target — handled below by extending the focus model.
+  if (releaseIds.length === 0) return null;
+  const linked = releases.filter(r => releaseIds.includes(r.id));
+  if (linked.length === 0) return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+        Included in releases
+      </span>
+      {linked.map(r => (
+        <span
+          key={r.id}
+          style={{
+            fontSize: 10.5, fontWeight: 500,
+            color: "var(--text-secondary)",
+            background: "var(--bg-sunken)",
+            border: "1px solid var(--border)",
+            borderRadius: 100, padding: "1px 8px",
+            whiteSpace: "nowrap",
+          }}
+          title={`${r.title} · ${RELEASE_STATUS_LABEL[r.status]}`}
+        >
+          {r.title}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ── Themes — overlay tags across the entire roadmap ──────────────────────
+// A theme is NOT a hierarchy node. It cannot own anything. It only
+// collects pointers across goals / intents / features / slices /
+// capabilities / releases so the team can read a cross-cutting slice of
+// the roadmap (e.g. "everything Auth-readiness related"). The same
+// object can wear many themes.
+
+// Fixed palette. Each entry maps a ThemeColor key to the three CSS
+// values we need for a chip. Sticks to the same hues used elsewhere in
+// the app so themes feel familiar.
+const THEME_PALETTE: Record<RoadmapThemeColor, { bg: string; fg: string; bd: string }> = {
+  blue:   { bg: "rgba(59,130,246,0.12)",  fg: "#1d4ed8", bd: "rgba(59,130,246,0.45)" },
+  amber:  { bg: "rgba(245,158,11,0.12)",  fg: "#b45309", bd: "rgba(245,158,11,0.45)" },
+  green:  { bg: "rgba(34,197,94,0.12)",   fg: "#15803d", bd: "rgba(34,197,94,0.45)" },
+  purple: { bg: "rgba(168,85,247,0.12)",  fg: "#7e22ce", bd: "rgba(168,85,247,0.45)" },
+  pink:   { bg: "rgba(236,72,153,0.12)",  fg: "#be185d", bd: "rgba(236,72,153,0.45)" },
+  teal:   { bg: "rgba(20,184,166,0.12)",  fg: "#0f766e", bd: "rgba(20,184,166,0.45)" },
+  gray:   { bg: "var(--bg-sunken)",       fg: "var(--text-secondary)", bd: "var(--border)" },
+};
+const THEME_COLOR_KEYS: RoadmapThemeColor[] = ["blue", "amber", "green", "purple", "pink", "teal", "gray"];
+
+function themePillStyle(color: RoadmapThemeColor | undefined): React.CSSProperties {
+  const p = THEME_PALETTE[color ?? "gray"];
+  return {
+    display: "inline-flex", alignItems: "center", gap: 4,
+    padding: "1px 8px", borderRadius: 100,
+    background: p.bg, color: p.fg,
+    border: `1px solid ${p.bd}`,
+    fontSize: 10.5, fontWeight: 500,
+    whiteSpace: "nowrap",
+  };
+}
+
+// Small reusable theme pill. Always read-only / display; toggling
+// happens via ThemePicker on the owner card or in the Themes tab.
+function ThemePill({ theme, onClick }: { theme: RoadmapTheme; onClick?: () => void }) {
+  const style = themePillStyle(theme.color);
+  return onClick ? (
+    <button
+      onClick={onClick}
+      title={theme.description ? `${theme.title} — ${theme.description}` : theme.title}
+      style={{ ...style, cursor: "pointer", border: style.border }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: 100, background: "currentColor", opacity: 0.7 }} />
+      {theme.title}
+    </button>
+  ) : (
+    <span title={theme.description ? `${theme.title} — ${theme.description}` : theme.title} style={style}>
+      <span style={{ width: 6, height: 6, borderRadius: 100, background: "currentColor", opacity: 0.7 }} />
+      {theme.title}
+    </span>
+  );
+}
+
+// ThemeRefList — read-only "Themes: blue-pill · amber-pill" row that
+// surfaces on owner cards (goal, slice, release, feature detail). Each
+// pill is clickable and switches the Roadmap to the Themes tab focused
+// on that theme. Includes a tiny "+ Theme" affordance that opens an
+// inline picker so the user can attach/detach from the card directly.
+function ThemeRefList({
+  themeIds,
+  onPick,           // null disables the "+ Theme" picker
+  pickerSelected,   // ids currently selected — for the picker UI
+}: {
+  themeIds: string[];
+  onPick?: (themeId: string) => void;
+  pickerSelected?: string[];
+}) {
+  const { themes, setRoadmapFocus } = useStore();
+  const linked = themes.filter(t => themeIds.includes(t.id));
+  if (linked.length === 0 && !onPick) return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+        Themes
+      </span>
+      {linked.map(t => (
+        <ThemePill
+          key={t.id}
+          theme={t}
+          onClick={() => setRoadmapFocus({ tab: "themes", themeId: t.id })}
+        />
+      ))}
+      {onPick && (
+        <ThemePicker
+          selectedIds={pickerSelected ?? themeIds}
+          onToggle={onPick}
+        />
+      )}
+    </div>
+  );
+}
+
+// ThemePicker — small popover for attaching/detaching themes from an
+// object. Reuses the same visual language as the other pickers but with
+// the colored theme pills inline.
+function ThemePicker({
+  selectedIds, onToggle,
+}: {
+  selectedIds: string[];
+  onToggle: (themeId: string) => void;
+}) {
+  const { themes, createTheme } = useStore();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const handleCreate = () => {
+    const title = draft.trim();
+    if (!title) return;
+    const id = createTheme({ title });
+    onToggle(id);
+    setDraft("");
+  };
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Add a theme"
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 3,
+          padding: "1px 8px", borderRadius: 100,
+          border: "1px dashed var(--border-strong)",
+          background: "transparent", color: "var(--text-tertiary)",
+          fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
+        onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+      >
+        <Plus size={10} /> Theme
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+          width: 280, maxHeight: 320, display: "flex", flexDirection: "column",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+          overflow: "hidden",
+        }}>
+          <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)", fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+            Tag with theme
+          </div>
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {themes.length === 0 ? (
+              <div style={{ padding: 12, fontSize: "var(--fs-meta)", color: "var(--text-tertiary)", textAlign: "center" }}>
+                No themes yet — create one below.
+              </div>
+            ) : themes.map(t => {
+              const sel = selectedIds.includes(t.id);
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => onToggle(t.id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    width: "100%", padding: "6px 10px", textAlign: "left",
+                    background: "transparent", border: "none", cursor: "pointer",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    width: 14, height: 14, borderRadius: 3,
+                    border: sel ? "1.5px solid var(--accent)" : "1.5px solid var(--border-strong)",
+                    background: sel ? "var(--accent)" : "transparent",
+                    flexShrink: 0,
+                  }}>
+                    {sel && <Check size={9} style={{ color: "white" }} />}
+                  </span>
+                  <ThemePill theme={t} />
+                </button>
+              );
+            })}
+          </div>
+          {/* Inline "create new theme" row at the bottom — the
+              nice-to-have lets the user spin up a theme from any card. */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "6px 10px", borderTop: "1px solid var(--border)",
+            background: "var(--bg-sunken)",
+          }}>
+            <input
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") handleCreate(); }}
+              placeholder="+ Create new theme…"
+              style={{
+                flex: 1, padding: "3px 6px",
+                border: "1px solid var(--border)", borderRadius: "var(--radius)",
+                background: "var(--bg)", color: "var(--text)",
+                fontSize: 11, outline: "none",
+              }}
+            />
+            <button
+              onClick={handleCreate}
+              disabled={!draft.trim()}
+              style={{
+                padding: "3px 10px", borderRadius: "var(--radius)",
+                background: draft.trim() ? "var(--accent)" : "var(--bg-sunken)",
+                color: draft.trim() ? "white" : "var(--text-tertiary)",
+                border: "none", fontSize: 11, fontWeight: 500,
+                cursor: draft.trim() ? "pointer" : "not-allowed",
+              }}
+            >Create</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ThemesView — main tab ───────────────────────────────────────────────
+function ThemesView() {
+  const { themes, createTheme, roadmapFocus, setRoadmapFocus } = useStore();
+  // Selected theme — left rail picks, right pane shows detail. Defaults
+  // to the first theme so the demo lands populated.
+  const [selectedId, setSelectedId] = useState<string | null>(() => themes[0]?.id ?? null);
+  // Re-resolve if the selected theme got deleted.
+  React.useEffect(() => {
+    if (selectedId && !themes.some(t => t.id === selectedId)) {
+      setSelectedId(themes[0]?.id ?? null);
+    }
+  }, [themes, selectedId]);
+  // Honour incoming cross-tab focus: when a ThemePill elsewhere asks
+  // the Themes tab to land on a specific theme, select it.
+  React.useEffect(() => {
+    if (roadmapFocus?.tab === "themes" && roadmapFocus.themeId) {
+      setSelectedId(roadmapFocus.themeId);
+      setRoadmapFocus(null);
+    }
+  }, [roadmapFocus, setRoadmapFocus]);
+
+  return (
+    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
+      {/* Left rail — list of themes */}
+      <aside style={{
+        width: 280, flexShrink: 0,
+        borderRight: "1px solid var(--border)",
+        background: "var(--bg)",
+        overflowY: "auto",
+        padding: "12px 12px 20px",
+        display: "flex", flexDirection: "column", gap: 6,
+      }}>
+        <div style={{
+          fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+          textTransform: "uppercase", color: "var(--text-tertiary)",
+          marginBottom: 2,
+        }}>
+          All themes · {themes.length}
+        </div>
+        <button
+          onClick={() => {
+            const id = createTheme({ title: "Untitled theme" });
+            setSelectedId(id);
+          }}
+          style={{
+            padding: "5px 10px",
+            border: "1px dashed var(--border-strong)",
+            borderRadius: "var(--radius)",
+            background: "transparent",
+            color: "var(--text-tertiary)",
+            fontSize: 11, fontWeight: 500, cursor: "pointer",
+            textAlign: "left",
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+          onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+        >
+          + New theme
+        </button>
+        {themes.length === 0 ? (
+          <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.45, marginTop: 6 }}>
+            Themes overlay the roadmap — they don't change the hierarchy. Use them to group cross-cutting work like &ldquo;Auth readiness&rdquo; or &ldquo;Performance Q3&rdquo;.
+          </div>
+        ) : themes.map(t => {
+          const isSel = selectedId === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setSelectedId(t.id)}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "5px 8px", borderRadius: "var(--radius)",
+                background: isSel ? "var(--accent-soft)" : "transparent",
+                border: "none", cursor: "pointer", textAlign: "left",
+              }}
+              onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = "transparent"; }}
+            >
+              <ThemePill theme={t} />
+            </button>
+          );
+        })}
+      </aside>
+
+      {/* Right pane — selected theme detail */}
+      <main style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "16px 24px" }}>
+        {selectedId ? (
+          <ThemeDetailPane themeId={selectedId} />
+        ) : (
+          <div style={{
+            margin: "60px auto", maxWidth: 360, textAlign: "center",
+            fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+          }}>
+            Pick a theme on the left, or click <strong style={{ color: "var(--text)" }}>+ New theme</strong> to add one. Themes overlay the roadmap — they never change the hierarchy.
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ── ThemeDetailPane ─────────────────────────────────────────────────────
+function ThemeDetailPane({ themeId }: { themeId: string }) {
+  const {
+    themes, weeklyGoals, wipItems, features, featureSlices, productCapabilities, releases,
+    updateTheme, deleteTheme,
+    toggleThemeGoal, toggleThemeIntent, toggleThemeFeature, toggleThemeSlice, toggleThemeCapability, toggleThemeRelease,
+    setRoadmapFocus, setRoute, openWip,
+  } = useStore();
+  const theme = themes.find(t => t.id === themeId);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(theme?.title ?? "");
+  const [descDraft, setDescDraft]   = useState(theme?.description ?? "");
+  React.useEffect(() => {
+    setTitleDraft(theme?.title ?? "");
+    setDescDraft(theme?.description ?? "");
+  }, [themeId, theme?.title, theme?.description]);
+  if (!theme) return null;
+
+  const linkedGoals    = weeklyGoals.filter(g => theme.linkedGoalIds.includes(g.id));
+  const linkedIntents  = wipItems.filter(w => w.type === "intent" && theme.linkedIntentIds.includes(w.id));
+  const linkedFeatures = features.filter(f => theme.linkedFeatureIds.includes(f.id));
+  const linkedSlices   = featureSlices.filter(s => theme.linkedSliceIds.includes(s.id));
+  const linkedCaps     = productCapabilities.filter(c => theme.linkedCapabilityIds.includes(c.id));
+  const linkedReleases = releases.filter(r => theme.linkedReleaseIds.includes(r.id));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 760 }}>
+      {/* Header — pill + title + status helpers + delete */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <ThemePill theme={theme} />
+            <ThemeColorPicker
+              color={theme.color}
+              onChange={(c) => updateTheme(theme.id, { color: c })}
+            />
+          </div>
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={e => setTitleDraft(e.target.value)}
+              onBlur={() => { updateTheme(theme.id, { title: titleDraft.trim() || theme.title }); setEditingTitle(false); }}
+              onKeyDown={e => {
+                if (e.key === "Enter") { updateTheme(theme.id, { title: titleDraft.trim() || theme.title }); setEditingTitle(false); }
+                else if (e.key === "Escape") { setTitleDraft(theme.title); setEditingTitle(false); }
+              }}
+              style={{
+                fontSize: 20, fontWeight: 600, color: "var(--text)",
+                border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+                padding: "4px 8px", background: "var(--bg)", outline: "none",
+              }}
+            />
+          ) : (
+            <h2
+              onClick={() => { setTitleDraft(theme.title); setEditingTitle(true); }}
+              style={{ margin: 0, fontSize: 20, fontWeight: 600, color: "var(--text)", cursor: "text", lineHeight: 1.25 }}
+              title="Click to rename"
+            >
+              {theme.title}
+            </h2>
+          )}
+          <textarea
+            value={descDraft}
+            onChange={e => setDescDraft(e.target.value)}
+            onBlur={() => updateTheme(theme.id, { description: descDraft })}
+            rows={2}
+            placeholder="What does this theme group together?"
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "6px 9px",
+              border: "1px solid var(--border)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
+              resize: "vertical",
+            }}
+            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+            onBlurCapture={e => (e.target.style.borderColor = "var(--border)")}
+          />
+        </div>
+        <button
+          onClick={() => { if (window.confirm(`Delete theme "${theme.title}"? Linked objects stay where they are.`)) deleteTheme(theme.id); }}
+          aria-label="Delete theme"
+          title="Delete theme"
+          style={{
+            padding: 4, color: "var(--text-tertiary)",
+            background: "transparent", border: "none", cursor: "pointer",
+            borderRadius: "var(--radius-sm)",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+        >
+          <X size={11} />
+        </button>
+      </div>
+
+      {/* Linked goals */}
+      <LinkedSection
+        title="Linked goals"
+        items={linkedGoals.map(g => ({
+          id: g.id, label: g.title,
+          right: <span style={subtleParentPill()}>{g.weekLabel}</span>,
+          onOpen: () => setRoadmapFocus({ tab: "weekly", goalId: g.id }),
+        }))}
+        addPicker={
+          <GoalPicker
+            value={theme.linkedGoalIds}
+            onToggle={(id) => toggleThemeGoal(theme.id, id)}
+          />
+        }
+        emptyHint="No goals tagged with this theme yet."
+      />
+
+      {/* Linked product work — features, slices, capabilities together
+          since the spec calls them out as one block. */}
+      <div>
+        <div style={{
+          fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+          textTransform: "uppercase", color: "var(--text-tertiary)",
+          marginBottom: 6,
+        }}>
+          Linked product work · {linkedFeatures.length + linkedSlices.length + linkedCaps.length}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <LinkedSection
+            title="Features"
+            items={linkedFeatures.map(f => ({
+              id: f.id, label: f.title,
+              onOpen: () => setRoadmapFocus({ tab: "product", featureId: f.id }),
+            }))}
+            addPicker={
+              <FeaturePicker
+                value={theme.linkedFeatureIds}
+                onToggle={(id) => toggleThemeFeature(theme.id, id)}
+              />
+            }
+            emptyHint="No features tagged yet."
+          />
+          <LinkedSection
+            title="Feature slices"
+            items={linkedSlices.map(s => {
+              const parent = features.find(f => f.id === s.featureId);
+              return {
+                id: s.id, label: s.title,
+                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+                onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
+              };
+            })}
+            addPicker={
+              <SlicePicker
+                value={theme.linkedSliceIds}
+                onToggle={(id) => toggleThemeSlice(theme.id, id)}
+              />
+            }
+            emptyHint="No feature slices tagged yet."
+          />
+          <LinkedSection
+            title="Product capabilities"
+            items={linkedCaps.map(c => {
+              const parent = features.find(f => f.id === c.featureId);
+              return {
+                id: c.id, label: c.title,
+                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+                onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
+              };
+            })}
+            addPicker={
+              <CapabilityPicker
+                value={theme.linkedCapabilityIds}
+                onToggle={(id) => toggleThemeCapability(theme.id, id)}
+              />
+            }
+            emptyHint="No capabilities tagged yet."
+          />
+        </div>
+      </div>
+
+      {/* Linked intents */}
+      <LinkedSection
+        title="Linked intents"
+        items={linkedIntents.map(w => ({
+          id: w.id, label: w.title,
+          onOpen: () => { setRoute("wip"); openWip(w.id); },
+        }))}
+        addPicker={
+          <IntentPicker
+            value={theme.linkedIntentIds}
+            onToggle={(id) => toggleThemeIntent(theme.id, id)}
+          />
+        }
+        emptyHint="No intents tagged yet."
+      />
+
+      {/* Linked releases */}
+      <LinkedSection
+        title="Linked releases"
+        items={linkedReleases.map(r => ({
+          id: r.id, label: r.title,
+          right: <span style={subtleParentPill()}>{r.status === "in_progress" ? "In Progress" : r.status === "released" ? "Released" : "Planned"}</span>,
+          onOpen: () => setRoadmapFocus({ tab: "releases" }),
+        }))}
+        addPicker={
+          <ReleasePicker
+            value={theme.linkedReleaseIds}
+            onToggle={(id) => toggleThemeRelease(theme.id, id)}
+          />
+        }
+        emptyHint="No releases tagged yet."
+      />
+    </div>
+  );
+}
+
+// Picker over all releases.
+function ReleasePicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+  const { releases } = useStore();
+  const options = releases.map(r => ({
+    id: r.id, label: r.title,
+    subtitle: r.status === "in_progress" ? "In Progress" : r.status === "released" ? "Released" : "Planned",
+  }));
+  return <PickerPopover label="Link release" options={options} value={value} onToggle={onToggle} />;
+}
+
+function ThemeColorPicker({
+  color, onChange,
+}: {
+  color: RoadmapThemeColor | undefined;
+  onChange: (c: RoadmapThemeColor) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Change theme color"
+        style={{
+          padding: "2px 8px", borderRadius: 100,
+          border: "1px dashed var(--border-strong)",
+          background: "transparent", color: "var(--text-tertiary)",
+          fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+        }}
+      >
+        Color
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 200,
+          padding: 6, gap: 4,
+          display: "grid", gridTemplateColumns: "repeat(7, 18px)",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+        }}>
+          {THEME_COLOR_KEYS.map(c => {
+            const p = THEME_PALETTE[c];
+            const isSel = color === c || (!color && c === "gray");
+            return (
+              <button
+                key={c}
+                onClick={() => { onChange(c); setOpen(false); }}
+                title={c}
+                style={{
+                  width: 18, height: 18, borderRadius: 100,
+                  background: p.bg,
+                  border: isSel ? `2px solid ${p.fg}` : `1px solid ${p.bd}`,
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

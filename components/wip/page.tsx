@@ -3379,8 +3379,8 @@ function formatSinceLabel(sinceISO: string): string {
 function IntentTraceabilitySection({ wip }: { wip: Wip }) {
   const {
     weeklyGoals, features, featureSlices, productCapabilities,
-    wipItems, signals,
-    toggleGoalIntent, linkSignalToWip, unlinkSignalFromWip,
+    wipItems, signals, signalWipLinks,
+    toggleGoalIntent, linkSignalToWip, unlinkSignalFromWip, setLinkRelationship,
     setRoute, setRoadmapFocus, openWip, openSignal, appMode,
   } = useStore();
   const readOnly = appMode === "client";
@@ -3503,7 +3503,11 @@ function IntentTraceabilitySection({ wip }: { wip: Wip }) {
         })}
       </TraceSubsection>
 
-      {/* Linked signals — editable */}
+      {/* Linked signals — editable. Each row shows the per-link
+          relationship (Addresses / Partially addresses / Investigates /
+          Related) which determines whether this intent satisfies the
+          signal. Satisfaction stays a human/product decision: marking
+          an intent done does NOT auto-close the signal. */}
       <TraceSubsection
         title="Linked signals"
         count={linkedSignalRows.length}
@@ -3529,13 +3533,54 @@ function IntentTraceabilitySection({ wip }: { wip: Wip }) {
         )}
         emptyHint="No signals linked yet. Intents may satisfy signals — the link is a human/product decision."
       >
-        {linkedSignalRows.map(sig => (
-          <LinkedSignalRow
-            key={sig.id}
-            sig={sig}
-            onOpen={() => { openWip(null); openSignal(sig.id); }}
-          />
-        ))}
+        {linkedSignalRows.map(sig => {
+          const link = signalWipLinks.find(l => l.signalId === sig.id && l.wipId === wip.id);
+          return (
+            <div key={sig.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <LinkedSignalRow
+                sig={sig}
+                onOpen={() => { openWip(null); openSignal(sig.id); }}
+              />
+              {/* Per-link relationship row. Editable on the intent side
+                  so users can declare "this intent addresses / partially
+                  addresses / investigates / is related to that signal"
+                  without flipping to the signal modal. */}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+                paddingLeft: 6, marginTop: -2,
+              }}>
+                <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+                  Relationship
+                </span>
+                {readOnly ? (
+                  <span style={relationshipPillStyle(link?.relationship)}>
+                    {shortRelationshipLabel(link?.relationship)}
+                  </span>
+                ) : (
+                  <select
+                    value={link?.relationship ?? "related_to"}
+                    onChange={e => setLinkRelationship(sig.id, wip.id, e.target.value as import("@/lib/data").SignalWipRelationship)}
+                    style={{
+                      padding: "1px 6px",
+                      border: "1px solid var(--border)", borderRadius: 100,
+                      background: "var(--bg)", color: "var(--text-secondary)",
+                      fontSize: 10, outline: "none",
+                    }}
+                    aria-label="Relationship to signal"
+                  >
+                    <option value="resolves">Addresses</option>
+                    <option value="partially_addresses">Partially addresses</option>
+                    <option value="investigates">Investigates</option>
+                    <option value="researches">Researches</option>
+                    <option value="clarifies">Clarifies</option>
+                    <option value="informs">Informs</option>
+                    <option value="related_to">Related</option>
+                  </select>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </TraceSubsection>
 
       {/* Tasks — child tasks. Only shown when at least one exists.
@@ -3841,4 +3886,135 @@ function taskColumnLabel(w: Wip): string {
   if (w.column === "in_progress") return "In progress";
   if (w.column === "to_do") return "To do";
   return "Backlog";
+}
+
+// Short, human-friendly relationship labels. The data model has seven
+// values; the prototype maps the rarely-used variants to "Related" so
+// the per-row pill stays compact and consistent with the spec's
+// 4-state vocabulary (Addresses / Partially addresses / Investigates /
+// Related). The full enum still lives in the picker so power users can
+// pick "Researches", "Clarifies", or "Informs" — those render under
+// the same "Related" pill style.
+export function shortRelationshipLabel(rel?: import("@/lib/data").SignalWipRelationship): string {
+  switch (rel) {
+    case "resolves":            return "Addresses";
+    case "partially_addresses": return "Partially addresses";
+    case "investigates":        return "Investigates";
+    case "researches":          return "Researches";
+    case "clarifies":           return "Clarifies";
+    case "informs":             return "Informs";
+    case "related_to":          return "Related";
+    case undefined:             return "Related";
+    default:                    return "Related";
+  }
+}
+
+// Relationship pill — colored by strength so the user can scan a list
+// and see how much each intent addresses a signal.
+//   resolves            → green (this intent addresses the signal)
+//   partially_addresses → amber (partial)
+//   investigates        → blue (still exploring)
+//   research/clarify/inform/related → neutral gray (informational only)
+export function relationshipPillStyle(rel?: import("@/lib/data").SignalWipRelationship): React.CSSProperties {
+  const palette: Record<string, { bg: string; fg: string; bd: string }> = {
+    resolves:            { bg: "rgba(34,197,94,0.12)",  fg: "#15803d", bd: "rgba(34,197,94,0.45)" },
+    partially_addresses: { bg: "rgba(245,158,11,0.12)", fg: "#b45309", bd: "rgba(245,158,11,0.45)" },
+    investigates:        { bg: "rgba(59,130,246,0.12)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.45)" },
+    related:             { bg: "var(--bg-sunken)",      fg: "var(--text-secondary)", bd: "var(--border)" },
+  };
+  const key =
+    rel === "resolves"            ? "resolves" :
+    rel === "partially_addresses" ? "partially_addresses" :
+    rel === "investigates"        ? "investigates" :
+                                    "related";
+  const p = palette[key];
+  return {
+    display: "inline-flex", alignItems: "center",
+    padding: "1px 7px", borderRadius: 100,
+    background: p.bg, color: p.fg,
+    border: `1px solid ${p.bd}`,
+    fontSize: 10, fontWeight: 600, letterSpacing: 0.2,
+    whiteSpace: "nowrap",
+  };
+}
+
+// Signal coverage state — derived purely from the Signal ↔ Wip links.
+// We deliberately do not touch the signal's existing status (new /
+// accepted / ready / closed); coverage is an overlay computed from how
+// the linked intents relate + where each sits in the Kanban.
+//
+// States:
+//   • "addressed"   = ≥1 intent with relationship "resolves" is done
+//   • "partially"   = there's at least an in-flight resolving intent OR
+//                     any "partially_addresses" link
+//   • "investigating" = only "investigates"/"researches"/"clarifies"
+//                     links exist (or only those + informational rows)
+//   • "open"        = no links at all
+//   • "informational" = links exist but none of them claim to address
+//                     or partially address the signal (just "Related"
+//                     / "Informs")
+export type SignalCoverage = "addressed" | "partially" | "investigating" | "informational" | "open";
+export function computeSignalCoverage(
+  signalId: string,
+  links: import("@/lib/data").SignalWipLink[],
+  wips: Wip[],
+): SignalCoverage {
+  const own = links.filter(l => l.signalId === signalId);
+  if (own.length === 0) return "open";
+  let hasResolvedDone = false;
+  let hasResolvedPending = false;
+  let hasPartial = false;
+  let hasInvestigative = false;
+  let hasInformationalOnly = true;
+  for (const l of own) {
+    const w = wips.find(x => x.id === l.wipId);
+    if (l.relationship === "resolves") {
+      hasInformationalOnly = false;
+      if (w?.column === "done") hasResolvedDone = true;
+      else hasResolvedPending = true;
+    } else if (l.relationship === "partially_addresses") {
+      hasInformationalOnly = false;
+      hasPartial = true;
+    } else if (
+      l.relationship === "investigates" ||
+      l.relationship === "researches"   ||
+      l.relationship === "clarifies"
+    ) {
+      hasInvestigative = true;
+    }
+    // "informs" and "related_to" leave hasInformationalOnly as true.
+  }
+  if (hasResolvedDone)    return "addressed";
+  if (hasResolvedPending || hasPartial) return "partially";
+  if (hasInvestigative)   return "investigating";
+  if (hasInformationalOnly) return "informational";
+  return "open";
+}
+
+export function signalCoverageLabel(c: SignalCoverage): string {
+  switch (c) {
+    case "addressed":     return "Addressed";
+    case "partially":     return "Partially addressed";
+    case "investigating": return "Under investigation";
+    case "informational": return "Informational only";
+    case "open":          return "Still open";
+  }
+}
+export function signalCoverageStyle(c: SignalCoverage): React.CSSProperties {
+  const palette: Record<SignalCoverage, { bg: string; fg: string; bd: string }> = {
+    addressed:     { bg: "rgba(34,197,94,0.12)",  fg: "#15803d", bd: "rgba(34,197,94,0.45)" },
+    partially:     { bg: "rgba(245,158,11,0.12)", fg: "#b45309", bd: "rgba(245,158,11,0.45)" },
+    investigating: { bg: "rgba(59,130,246,0.12)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.45)" },
+    informational: { bg: "var(--bg-sunken)",      fg: "var(--text-secondary)", bd: "var(--border)" },
+    open:          { bg: "rgba(239,68,68,0.08)",  fg: "#b91c1c", bd: "rgba(239,68,68,0.30)" },
+  };
+  const p = palette[c];
+  return {
+    display: "inline-flex", alignItems: "center", gap: 4,
+    padding: "1px 8px", borderRadius: 100,
+    background: p.bg, color: p.fg,
+    border: `1px solid ${p.bd}`,
+    fontSize: 10.5, fontWeight: 600, letterSpacing: 0.2,
+    whiteSpace: "nowrap",
+  };
 }
