@@ -1,26 +1,116 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #ffffff;
+  --bg-sunken: #fafafa;
+  --bg-hover: #f5f5f4;
+  --bg-selected: #eef2ff;
+  --bg-overlay: rgba(15,15,17,0.48);
+  --border: #ececec;
+  --border-strong: #dcdcdc;
+  --border-focus: #5b6cff;
+  --text: #0f0f11;
+  --text-secondary: #5f5f66;
+  --text-tertiary: #8b8b92;
+  --text-disabled: #b8b8bd;
+  --accent: #5b6cff;
+  --accent-hover: #4a5bf0;
+  --accent-soft: #eef0ff;
+  --status-new: #f59e0b;
+  --status-accepted: #10b981;
+  --status-ready: #0d9488;
+  --status-ready-soft: #f0fdfa;
+  --status-ready-border: #5eead4;
+  --status-rejected: #9ca3af;
+  --status-skipped: #8b5cf6;
+  --task: #7c3aed;
+  --intent: #0ea5e9;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgba(15,15,17,0.04);
+  --shadow-md: 0 4px 12px rgba(15,15,17,0.06), 0 1px 2px rgba(15,15,17,0.04);
+  --shadow-lg: 0 20px 48px rgba(15,15,17,0.12), 0 2px 6px rgba(15,15,17,0.06);
+  /* density default */
+  --row-h: 36px; --row-pad: 8px 12px; --gap: 10px;
+  --card-pad: 12px; --card-gap: 10px;
+  --fs-body: 13px; --fs-meta: 12px; --fs-title: 13.5px;
 }
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* Dark theme — driven by `data-theme="dark"` on <html>. The toggle in the
+   top-nav writes the attribute and persists the choice to localStorage. We
+   override the same custom properties so every component picks up the new
+   palette without per-component dark-mode branches. */
+[data-theme="dark"] {
+  --bg:           #15171b;
+  --bg-sunken:    #1c1f24;
+  --bg-hover:     #23272d;
+  --bg-selected:  #1f2640;
+  --bg-overlay:   rgba(0,0,0,0.55);
+  --border:       #2a2f37;
+  --border-strong:#3a414b;
+  --border-focus: #6c7bff;
+  --text:         #ececef;
+  --text-secondary: #b4b6bb;
+  --text-tertiary:  #82858c;
+  --text-disabled:  #4f535a;
+  --accent:       #6c7bff;
+  --accent-hover: #8390ff;
+  --accent-soft:  rgba(108,123,255,0.14);
+  --status-new:       #f59e0b;
+  --status-accepted:  #34d399;
+  --status-ready:     #2dd4bf;
+  --status-ready-soft:    rgba(20,184,166,0.12);
+  --status-ready-border:  rgba(45,212,191,0.40);
+  --status-rejected:  #6b7280;
+  --status-skipped:   #a78bfa;
+  --task:   #a78bfa;
+  --intent: #38bdf8;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.30);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.20);
+  --shadow-lg: 0 24px 56px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.32);
 }
+/* Make the dark scrollbar thumb visible against the dark surface. */
+[data-theme="dark"] *:hover::-webkit-scrollbar-thumb { background: #3a414b; }
+/* Native form-controls (selects/inputs) inherit OS appearance — nudge them
+   to use the dark palette so they don't render as bright pop-outs. */
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select { color-scheme: dark; }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+[data-density="compact"] {
+  --row-h: 30px; --row-pad: 5px 12px; --gap: 8px;
+  --card-pad: 10px; --card-gap: 8px;
+  --fs-body: 12.5px; --fs-meta: 11.5px; --fs-title: 13px;
 }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+[data-density="comfortable"] {
+  --row-h: 44px; --row-pad: 12px 14px; --gap: 12px;
+  --card-pad: 14px; --card-gap: 12px;
+  --fs-body: 13.5px; --fs-meta: 12.5px; --fs-title: 14px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: 'Inter Tight', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: var(--fs-body); line-height: 1.45; -webkit-font-smoothing: antialiased; font-feature-settings: "cv11","ss01","ss03"; }
+body { overflow: hidden; height: 100vh; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: none; background: none; padding: 0; }
+:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; border-radius: 4px; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 10px; }
+*:hover::-webkit-scrollbar-thumb { background: #d4d4d4; }
+::-webkit-scrollbar-track { background: transparent; }
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.92em; }
+@keyframes slideUp { from { transform: translateX(-50%) translateY(20px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+@keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalIn { from { opacity: 0; transform: translate(-50%,-48%) scale(0.98); } to { opacity: 1; transform: translate(-50%,-50%) scale(1); } }
+@keyframes spin    { to   { transform: rotate(360deg); } }
+/* Right-side panel reveal — used by the WIP "What changed" timeline drawer */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0.6; }
+  to   { transform: translateX(0);    opacity: 1;   }
+}
+/* One-shot subtle pop used by client-view "recently changed" cards on first mount */
+@keyframes recentPop {
+  0%   { box-shadow: 0 0 0 0 rgba(20,184,166,0.0); transform: translateY(0); }
+  18%  { box-shadow: 0 0 0 4px rgba(20,184,166,0.18); transform: translateY(-1px); }
+  100% { box-shadow: 0 0 0 0 rgba(20,184,166,0.0); transform: translateY(0); }
 }
