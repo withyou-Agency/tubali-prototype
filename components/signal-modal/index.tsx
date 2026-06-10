@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState, useRef, useMemo } from "react";
 import { useStore } from "@/lib/store";
-import { Signal, HideUnderRule, SignalPriority, SignalStatus, SignalComment, SignalAttachment, Visibility, USERS, userById, WipType, computeAutoPriority, deriveDigest, suggestLabelsForSignal, recentlyUsedLabels, SPLIT_MAX_PER_SOURCE, splitChildrenCount, duplicateStateOf, isDuplicateGroupNewOrChanged } from "@/lib/data";
+import { Signal, HideUnderRule, SignalPriority, SignalStatus, SignalComment, SignalAttachment, Visibility, USERS, userById, WipType, computeAutoPriority, deriveDigest, suggestLabelsForSignal, recentlyUsedLabels, SPLIT_MAX_PER_SOURCE, splitChildrenCount, duplicateStateOf, isDuplicateGroupNewOrChanged, SIGNAL_GROUP_REASON_LABEL } from "@/lib/data";
 import { StatusDot } from "@/components/ui/dot";
 import { Avatar } from "@/components/ui/avatar";
 import { LabelChip } from "@/components/ui/label-chip";
@@ -742,7 +742,7 @@ function AddDuplicateButton({ signalId }: { signalId: string }) {
 }
 
 export function SignalModal() {
-  const { openSignalId, openSignal, signals, updateSignal, hideUnderRules, wipItems, transactions, signalComments, addSignalComment, signalAttachments, appMode, openWip, setRoute, cloneSignal, duplicateGroups, markDuplicateGroupSeen } = useStore();
+  const { openSignalId, openSignal, signals, updateSignal, hideUnderRules, wipItems, transactions, signalComments, addSignalComment, signalAttachments, appMode, openWip, setRoute, cloneSignal, duplicateGroups, markDuplicateGroupSeen, signalGroups, signalGroupFilter } = useStore();
   const readOnly = appMode === "client";
   const [showLabelPicker, setShowLabelPicker]     = useState(false);
   const [showCreateWork, setShowCreateWork]       = useState(false);
@@ -750,7 +750,16 @@ export function SignalModal() {
   const [activeTab, setActiveTab] = useState<"details" | "digest" | "comments" | "history">("details");
 
   const signal = signals.find(s => s.id === openSignalId);
-  const filteredIds = signals.map(s => s.id);
+  // Scope the prev/next navigation set to the active SignalGroup when
+  // the user is inside a group workspace — keeps review focused on the
+  // related signals and doesn't bounce them through unrelated ones.
+  // Falls back to the full signals list everywhere else.
+  const activeGroup = signalGroupFilter
+    ? signalGroups.find(g => g.id === signalGroupFilter) ?? null
+    : null;
+  const filteredIds = activeGroup
+    ? signals.filter(s => activeGroup.signalIds.includes(s.id)).map(s => s.id)
+    : signals.map(s => s.id);
   const currentIdx = signal ? filteredIds.indexOf(signal.id) : -1;
   const allLabels = Array.from(new Set(signals.flatMap(s => s.labels)));
 
@@ -1071,6 +1080,12 @@ export function SignalModal() {
                 {(linkedWips.length > 0 || !readOnly) && (
                   <LinkedWorkSection signal={signal} wips={linkedWips} />
                 )}
+
+                {/* Groups — persistent signal review workspaces the
+                    signal belongs to. Many-to-many, so we list every
+                    group it sits in. Clicking a group opens the
+                    Signals list filtered to that group. */}
+                <SignalGroupsSection signal={signal} />
 
                 {/* Hidden under this signal */}
                 {ownedRules.length > 0 && (
@@ -1708,6 +1723,133 @@ function HiddenSignalRow({ signal, onOpen, onRestore, readOnly }: {
               </div>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Signal Groups section ──────────────────────────────────────────────
+// Surfaces the persistent SignalGroups this signal belongs to. Groups
+// are many-to-many: one signal can sit in multiple groups. Each row
+// shows the group name + status + reasons; clicking a row closes the
+// signal modal and opens the Signals list filtered to that group.
+// Read-only on this surface — adding/removing groups happens via the
+// selection bar's "Save as group" flow or the per-group panel.
+function SignalGroupsSection({ signal }: { signal: Signal }) {
+  const { signalGroups, openGroup, openSignal, removeSignalFromGroup, appMode } = useStore();
+  const readOnly = appMode === "client";
+  const memberships = signalGroups.filter(g => g.signalIds.includes(signal.id));
+  // Always render so the section header is discoverable even with no
+  // groups yet — empty state explains how to create one.
+  return (
+    <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: "var(--radius-lg)", border: "1px solid var(--border)", background: "var(--bg-sunken)" }}>
+      <div style={{
+        fontSize: "var(--fs-meta)", color: "var(--text-tertiary)",
+        fontWeight: 500, marginBottom: 8, display: "flex",
+        alignItems: "center", gap: 8,
+      }}>
+        <Link size={12} /> Groups · {memberships.length}
+        {memberships.length > 1 && (
+          <span style={{ fontWeight: 400, fontSize: 11, color: "var(--text-tertiary)" }}>
+            · this signal is in {memberships.length} groups
+          </span>
+        )}
+      </div>
+      {memberships.length === 0 ? (
+        <div style={{
+          padding: "8px 10px", textAlign: "center", fontSize: "var(--fs-meta)",
+          color: "var(--text-tertiary)", border: "1px dashed var(--border)",
+          borderRadius: "var(--radius)", background: "var(--bg)",
+          lineHeight: 1.45,
+        }}>
+          Not in any group yet. Select this signal alongside others on the Signals page and use <strong style={{ color: "var(--text-secondary)" }}>Save as group</strong>.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {memberships.map(g => (
+            <div
+              key={g.id}
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "8px 10px", borderRadius: "var(--radius)",
+                border: "1px solid var(--border)", background: "var(--bg)",
+              }}
+            >
+              <button
+                onClick={() => { openSignal(null); openGroup(g.id); }}
+                style={{
+                  flex: 1, minWidth: 0, textAlign: "left",
+                  background: "transparent", border: "none", padding: 0,
+                  cursor: "pointer",
+                }}
+                title={`Open Signals filtered to "${g.name}"`}
+              >
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <span style={{
+                    fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>
+                    {g.name}
+                  </span>
+                  <span style={{
+                    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                    color: g.status === "open" ? "#1d4ed8" : g.status === "in_review" ? "#b45309" : "var(--text-tertiary)",
+                    background: g.status === "open" ? "rgba(59,130,246,0.12)" : g.status === "in_review" ? "rgba(245,158,11,0.12)" : "var(--bg-sunken)",
+                    border: `1px solid ${g.status === "open" ? "rgba(59,130,246,0.45)" : g.status === "in_review" ? "rgba(245,158,11,0.45)" : "var(--border)"}`,
+                    borderRadius: 100, padding: "1px 7px",
+                    whiteSpace: "nowrap",
+                  }}>
+                    {g.status === "open" ? "OPEN" : g.status === "in_review" ? "IN REVIEW" : "ARCHIVED"}
+                  </span>
+                </div>
+                <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                    {g.signalIds.length} signal{g.signalIds.length === 1 ? "" : "s"}
+                  </span>
+                  {g.reasons.slice(0, 2).map(r => (
+                    <span key={r} style={{
+                      fontSize: 10, fontWeight: 500,
+                      color: "var(--text-secondary)",
+                      background: "var(--bg-sunken)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 100, padding: "1px 7px",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {SIGNAL_GROUP_REASON_LABEL[r]}
+                    </span>
+                  ))}
+                  {g.reasons.length > 2 && (
+                    <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+                      +{g.reasons.length - 2}
+                    </span>
+                  )}
+                </div>
+              </button>
+              {!readOnly && (
+                <button
+                  onClick={() => {
+                    if (window.confirm(`Remove this signal from "${g.name}"? The group itself stays.`)) {
+                      removeSignalFromGroup(g.id, signal.id);
+                    }
+                  }}
+                  title="Remove this signal from the group"
+                  aria-label="Remove from group"
+                  style={{
+                    padding: 4, color: "var(--text-tertiary)",
+                    background: "transparent", border: "none", cursor: "pointer",
+                    borderRadius: "var(--radius-sm)",
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+                >
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>

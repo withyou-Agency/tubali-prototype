@@ -12,9 +12,12 @@ import {
   SPLIT_MAX_PER_SOURCE, splitChildrenCount,
   WeeklyGoal, WeeklyGoalStatus, ProductArea, Feature, FeatureStatus, FeatureSlice,
   FeatureGroup, ProductCapability, SliceCapabilityStatus,
-  Release, ReleaseStatus, RoadmapTheme,
+  Release, ReleaseStatus, RoadmapTheme, MilestoneAuditEntry, MilestoneAuditKind,
+  MoscowPriority, MilestoneObjectKind, milestoneLinkKey,
+  SignalGroup, SignalGroupStatus, SignalGroupReason,
+  DraftIntent,
   PRODUCT_AREAS, FEATURES, FEATURE_SLICES, FEATURE_GROUPS, PRODUCT_CAPABILITIES, WEEKLY_GOALS,
-  RELEASES, THEMES,
+  RELEASES, THEMES, SIGNAL_GROUPS, DRAFT_INTENTS,
   hideUnderKey, findHideUnderRule, getUndoSafety,
   computeAutoPriority,
 } from "./data";
@@ -117,6 +120,23 @@ interface StoreState {
   // node and does NOT own anything; the same target can carry many
   // themes simultaneously.
   themes: RoadmapTheme[];
+  // SignalGroups — persistent, user-curated workspaces of related
+  // signals. Many-to-many: one signal can sit in multiple groups.
+  // Different from duplicateGroups (those are system-suggested
+  // de-duplication candidates).
+  signalGroups: SignalGroup[];
+  // Transient: id of a SignalGroup currently "opened" — drives the
+  // Signals list filter when set and the Groups panel highlight.
+  signalGroupFilter: string | null;
+  // Signals-page view mode. "list" (default) shows the standard filtered
+  // signals list; "groups" shows the all-saved-groups list view. When a
+  // signalGroupFilter is set the workspace takes over either mode.
+  signalsViewMode: "list" | "groups";
+  // Draft intents — planning-only records that live inside a SignalGroup
+  // until the user finalizes them into a real Wip via createWorkItem.
+  // Drafts stay around after finalization (stamped with finalizedWipId)
+  // so the group history reads cleanly.
+  draftIntents: DraftIntent[];
   // Duplicate groups — both suggested (unconfirmed) and confirmed groups
   // live here. The model has a `confirmed` flag so we don't keep two
   // parallel collections.
@@ -225,6 +245,91 @@ interface StoreActions {
   toggleReleaseFeature:    (releaseId: string, featureId: string) => void;
   toggleReleaseSlice:      (releaseId: string, sliceId: string) => void;
   toggleReleaseCapability: (releaseId: string, capabilityId: string) => void;
+  // Two new product-object kinds reachable from a milestone: capability
+  // areas (whole product surfaces) and feature groups (sub-areas).
+  toggleReleaseArea:         (releaseId: string, areaId: string) => void;
+  toggleReleaseFeatureGroup: (releaseId: string, groupId: string) => void;
+  // Per-link MoSCoW + note. `kind` + `objectId` identify the row; the
+  // priority is scoped to this milestone only (the same product object
+  // can carry different priorities across other milestones).
+  setMilestoneObjectPriority: (releaseId: string, kind: MilestoneObjectKind, objectId: string, priority: MoscowPriority) => void;
+  setMilestoneObjectNote:     (releaseId: string, kind: MilestoneObjectKind, objectId: string, note: string) => void;
+  // Append one entry to the milestone's audit log. UI callers compose
+  // the human-readable summary (they already have the names of the
+  // linked objects on hand). Structured fields (kind / objectLabel /
+  // previousValue / nextValue) are optional — when provided, the audit
+  // log renders the structured "what · object · before → after" layout
+  // instead of just the plain summary line.
+  recordMilestoneAudit: (
+    releaseId: string,
+    summary: string,
+    structured?: {
+      kind?: MilestoneAuditKind;
+      objectLabel?: string;
+      previousValue?: string;
+      nextValue?: string;
+    },
+  ) => void;
+  // Spawn a new version of an existing milestone. The clone inherits
+  // scope / status / dates as a starting point, points back at the
+  // source via versionParentId, and shares the source's family id so
+  // the version-picker UI groups them together.
+  cloneRelease: (sourceId: string, opts?: { summary?: string }) => string;
+  // ── SignalGroup CRUD ──────────────────────────────────────────────
+  createSignalGroup: (input: { name: string; signalIds?: string[]; reasons?: SignalGroupReason[]; notes?: string }) => string;
+  updateSignalGroup: (id: string, patch: Partial<SignalGroup>) => void;
+  deleteSignalGroup: (id: string) => void;
+  // Add or remove a single signal from a group. Idempotent.
+  addSignalToGroup:      (groupId: string, signalId: string) => void;
+  removeSignalFromGroup: (groupId: string, signalId: string) => void;
+  // Bulk attach — used by the SelectionBar "save selected as group" flow.
+  addSignalsToGroup: (groupId: string, signalIds: string[]) => void;
+  // Bulk detach used by the group-workspace "Remove from group" action.
+  removeSignalsFromGroup: (groupId: string, signalIds: string[]) => void;
+  // Mark a set of signals as duplicates of one main signal. Uses the
+  // existing duplicate-link plumbing under the hood but exposes a
+  // bulk-friendly entry point. Returns the resulting duplicate group id.
+  markSignalsAsDuplicatesOf: (mainSignalId: string, otherSignalIds: string[]) => string | null;
+  // Close a signal with a "duplicate of" reason. Uses the existing
+  // closure flow + stamps a structured note so the signal's history
+  // makes the relationship legible later.
+  closeSignalAsDuplicateOf: (signalId: string, mainSignalId: string) => void;
+  // Open / close a group as the active Signals-list filter.
+  openGroup: (groupId: string | null) => void;
+  // Toggle the Signals-page view mode between the standard signals
+  // list and the all-saved-groups list. The Groups list view replaces
+  // the previous tiny popover-style "Saved Groups" UI.
+  setSignalsViewMode: (m: "list" | "groups") => void;
+
+  // ── Draft intents (per-SignalGroup) ────────────────────────────────
+  createDraftIntent: (input: {
+    groupId: string;
+    title: string;
+    description?: string;
+    signalIds: string[];
+    notes?: string;
+    suggestedTasks?: string[];
+    // Structured planning fields — optional at create time, all can
+    // be edited after.
+    acceptanceCriteria?: string[];
+    context?: string;
+    decisionRationale?: string;
+    rejectedAlternatives?: string;
+    plan?: string;
+  }) => string;
+  updateDraftIntent: (id: string, patch: Partial<Omit<DraftIntent, "id" | "groupId" | "createdAt">>) => void;
+  deleteDraftIntent: (id: string) => void;
+  // Promote a draft into a real intent (Wip). Returns the new wip id.
+  // The draft itself stays, stamped with finalizedWipId + finalizedAt so
+  // the group workspace can show "finalized from draft" lineage.
+  finalizeDraftIntent: (id: string) => string | null;
+  // Explicit "link this group to an existing intent" — used when the
+  // work already exists and the user wants the group to reference it
+  // without creating a draft. Selected signals get linked to the intent
+  // via the regular linkSignalToWip path; the intent id lands on the
+  // group's linkedIntentIds.
+  linkGroupToExistingIntent: (groupId: string, intentId: string, signalIds: string[]) => void;
+
   // ── Theme CRUD + linking ─────────────────────────────────────────────
   // Themes are OVERLAYS: a theme links to goals / intents / features /
   // slices / capabilities / releases without owning any of them. Each
@@ -472,6 +577,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [productCapabilities, setProductCapabilities] = useState<ProductCapability[]>(PRODUCT_CAPABILITIES);
   const [releases, setReleases] = useState<Release[]>(RELEASES);
   const [themes, setThemes] = useState<RoadmapTheme[]>(THEMES);
+  const [signalGroups, setSignalGroups] = useState<SignalGroup[]>(SIGNAL_GROUPS);
+  const [signalGroupFilter, setSignalGroupFilter] = useState<string | null>(null);
+  const [signalsViewMode, setSignalsViewModeState] = useState<"list" | "groups">("list");
+  const [draftIntents, setDraftIntents] = useState<DraftIntent[]>(DRAFT_INTENTS);
   const [splitView, setSplitView]           = useState<{ leftId: string; rightId: string } | null>(null);
   const [wipEvents, setWipEvents]           = useState<WipEvent[]>(WIP_EVENTS);
   // Default to ~2 days ago so the demo seed has something fresh-looking.
@@ -1231,6 +1340,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return [...prev.slice(0, idx + 1), ...newSignals, ...prev.slice(idx + 1)];
     });
 
+    // Preserve SignalGroup membership across split — the spec requires
+    // both children to inherit every group the parent was in, so the
+    // workspace stays coherent after a split. The user can later remove
+    // one child from a group via the workspace.
+    setSignalGroups(prev => prev.map(g => {
+      if (!g.signalIds.includes(source.id)) return g;
+      const toAdd = newIds.filter(nid => !g.signalIds.includes(nid));
+      if (toAdd.length === 0) return g;
+      return { ...g, signalIds: [...g.signalIds, ...toAdd], updatedAt: new Date().toISOString() };
+    }));
+
     // History — one event on the root summarising the action, and one
     // per child explaining its origin (so the child's own history
     // tells the full story without cross-referencing the root).
@@ -1474,6 +1594,33 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
     return newId;
   }, [signals, duplicateGroups, addSignalToDuplicateGroup, acceptDuplicateGroup]);
+
+  // Bulk-friendly "mark these signals as duplicates of one main signal".
+  // Reuses addDuplicateLink under the hood, then explicitly pins the
+  // chosen main via setMainSignal so the user's intent isn't overridden
+  // by the oldest-by-default rule. The first successful link's group id
+  // is returned for the caller (e.g. so the UI can highlight it).
+  const markSignalsAsDuplicatesOf = useCallback((mainSignalId: string, otherSignalIds: string[]): string | null => {
+    if (otherSignalIds.length === 0) return null;
+    let resultGroupId: string | null = null;
+    for (const otherId of otherSignalIds) {
+      if (otherId === mainSignalId) continue;
+      const gid = addDuplicateLink(mainSignalId, otherId);
+      if (gid && !resultGroupId) resultGroupId = gid;
+    }
+    if (resultGroupId) setMainSignal(resultGroupId, mainSignalId);
+    return resultGroupId;
+  }, [addDuplicateLink, setMainSignal]);
+
+  // Explicit "Closed as duplicate of <title>". Calls the regular close
+  // path so the closure record, status update, and follow-up effects
+  // (signal review cascades, etc.) all happen unchanged — we just stamp
+  // the closure note with a structured marker the signal modal can read.
+  const closeSignalAsDuplicateOf = useCallback((signalId: string, mainSignalId: string) => {
+    const main = signals.find(s => s.id === mainSignalId);
+    const mainTitle = main?.title ?? mainSignalId;
+    closeSignalWithReason(signalId, `Closed as duplicate of "${mainTitle}"`);
+  }, [signals, closeSignalWithReason]);
 
   const closeDuplicateGroup = useCallback((groupId: string) => {
     const group = duplicateGroups.find(g => g.id === groupId);
@@ -2680,6 +2827,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     // features outlive their grouping. The group itself is removed.
     setFeatureGroups(prev => prev.filter(g => g.id !== id));
     setFeatures(prev => prev.map(f => f.featureGroupId === id ? { ...f, featureGroupId: undefined } : f));
+    // Cascade into milestone productPriorities + linked arrays.
+    const key = milestoneLinkKey("group", id);
+    setReleases(prev => prev.map(r => {
+      if (!r.linkedFeatureGroupIds.includes(id) && !(key in r.productPriorities)) return r;
+      const nextPriorities = { ...r.productPriorities };
+      delete nextPriorities[key];
+      return {
+        ...r,
+        linkedFeatureGroupIds: r.linkedFeatureGroupIds.filter(gid => gid !== id),
+        productPriorities: nextPriorities,
+      };
+    }));
   }, []);
 
   const createProductCapability = useCallback((input: { title: string; featureId: string }) => {
@@ -2716,50 +2875,213 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       : t));
   }, []);
 
-  // ── Releases — CRUD + link toggles ───────────────────────────────────
+  // ── Milestones (internal name kept as `release`) ─────────────────────
+  // Each product-object toggle adds/removes the id from the relevant
+  // linked array AND sets/removes the matching entry in productPriorities
+  // so the per-milestone MoSCoW priority arrives + disappears with the
+  // link itself. New links default to "must" — the user is normally
+  // adding work they expect to ship, and a Must-have can always be
+  // downgraded inline.
   const createRelease = useCallback((input: { title: string; description?: string }) => {
     const id = newId("rel");
+    const now = nowISO();
+    // A brand-new milestone is its OWN family root: versionFamilyId
+    // points at itself. cloneRelease() below mints downstream versions
+    // that share this id as their family root.
     const rel: Release = {
       id,
-      title: input.title.trim() || "Untitled release",
+      title: input.title.trim() || "Untitled milestone",
       description: input.description,
       status: "planned",
-      linkedGoalIds: [], linkedFeatureIds: [],
-      linkedSliceIds: [], linkedCapabilityIds: [],
-      createdAt: nowISO(),
+      linkedGoalIds: [],
+      linkedAreaIds: [], linkedFeatureGroupIds: [],
+      linkedFeatureIds: [], linkedSliceIds: [], linkedCapabilityIds: [],
+      productPriorities: {},
+      versionFamilyId: id,
+      versionLabel: "v1",
+      versionSummary: "Initial draft",
+      auditLog: [
+        {
+          id: newId("audit"), at: now,
+          summary: `Created milestone — ${input.title.trim() || "Untitled milestone"} · v1`,
+          kind: "created",
+        },
+      ],
+      createdAt: now,
     };
     setReleases(prev => prev.some(r => r.id === id) ? prev : [...prev, rel]);
     return id;
+  }, []);
+  // Append a single line to a milestone's audit log. Callers compose
+  // the summary string (they already have human-readable names of the
+  // objects being mutated on hand). Append-only; entries never edit.
+  const recordMilestoneAudit = useCallback((
+    releaseId: string,
+    summary: string,
+    structured?: {
+      kind?: MilestoneAuditKind;
+      objectLabel?: string;
+      previousValue?: string;
+      nextValue?: string;
+    },
+  ) => {
+    const at = nowISO();
+    const entry: MilestoneAuditEntry = {
+      id: newId("audit"),
+      at,
+      summary,
+      kind: structured?.kind,
+      objectLabel: structured?.objectLabel,
+      previousValue: structured?.previousValue,
+      nextValue: structured?.nextValue,
+    };
+    setReleases(prev => prev.map(r => r.id === releaseId
+      ? { ...r, auditLog: [...r.auditLog, entry] }
+      : r));
+  }, []);
+  // Clone a milestone into the next version in its family. The new
+  // row inherits scope / status / dates as a starting point, points
+  // back at the source via versionParentId, and shares the source's
+  // versionFamilyId so they group together in the UI. Audit log on
+  // the clone records its origin; the source gets a "Cloned to vN"
+  // entry as well so you can trace lineage in either direction.
+  const cloneRelease = useCallback((sourceId: string, opts?: { summary?: string }) => {
+    const newReleaseId = newId("rel");
+    const now = nowISO();
+    setReleases(prev => {
+      const source = prev.find(r => r.id === sourceId);
+      if (!source) return prev;
+      // Compute next version label across the existing family. We
+      // count + 1 rather than max(vN)+1 so deletions don't reuse
+      // labels (e.g. v1, v3 still produces v3 → next is v4 because
+      // family.length === 2).
+      const familyId = source.versionFamilyId;
+      const familySize = prev.filter(r => r.versionFamilyId === familyId).length;
+      const label = `v${familySize + 1}`;
+      const cloneEntry: MilestoneAuditEntry = {
+        id: newId("audit"),
+        at: now,
+        summary: opts?.summary
+          ? `Created ${label} from ${source.versionLabel} — ${opts.summary}`
+          : `Created ${label} from ${source.versionLabel}`,
+        kind: "cloned_from",
+        previousValue: source.versionLabel,
+        nextValue: label,
+        objectLabel: opts?.summary,
+      };
+      const sourceEntry: MilestoneAuditEntry = {
+        id: newId("audit"),
+        at: now,
+        summary: `Cloned to ${label}`,
+        kind: "cloned_to",
+        previousValue: source.versionLabel,
+        nextValue: label,
+      };
+      const clone: Release = {
+        ...source,
+        id: newReleaseId,
+        versionLabel: label,
+        versionParentId: source.id,
+        versionFamilyId: familyId,
+        versionSummary: opts?.summary,
+        // Fresh audit log for the clone — copying the source's log
+        // would conflate two separate timelines. Clone log starts
+        // with the lineage marker.
+        auditLog: [cloneEntry],
+        createdAt: now,
+      };
+      return prev.map(r => r.id === sourceId
+        ? { ...r, auditLog: [...r.auditLog, sourceEntry] }
+        : r,
+      ).concat(clone);
+    });
+    return newReleaseId;
   }, []);
   const updateRelease = useCallback((id: string, patch: Partial<Release>) => {
     setReleases(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
   }, []);
   const deleteRelease = useCallback((id: string) => {
     setReleases(prev => prev.filter(r => r.id !== id));
-    // Cascade: drop this release from any theme that tagged it.
     setThemes(prev => prev.map(t => t.linkedReleaseIds.includes(id)
       ? { ...t, linkedReleaseIds: t.linkedReleaseIds.filter(rid => rid !== id) }
       : t));
   }, []);
   const toggleReleaseGoal = useCallback((releaseId: string, goalId: string) => {
+    // Goals don't carry MoSCoW — straight array toggle.
     setReleases(prev => prev.map(r => r.id === releaseId
       ? { ...r, linkedGoalIds: toggleArrayMember(r.linkedGoalIds, goalId) }
       : r));
   }, []);
+  // Internal helper — atomically flip a product-object link AND keep
+  // productPriorities in sync. Adding seeds priority "must"; removing
+  // deletes the priority entry.
+  const toggleProductObject = (
+    releaseId: string,
+    arrayKey: "linkedAreaIds" | "linkedFeatureGroupIds" | "linkedFeatureIds" | "linkedSliceIds" | "linkedCapabilityIds",
+    kind: MilestoneObjectKind,
+    objectId: string,
+  ) => {
+    setReleases(prev => prev.map(r => {
+      if (r.id !== releaseId) return r;
+      const current = r[arrayKey];
+      const has = current.includes(objectId);
+      const nextArr = has
+        ? current.filter(x => x !== objectId)
+        : [...current, objectId];
+      const nextPriorities = { ...r.productPriorities };
+      const k = milestoneLinkKey(kind, objectId);
+      if (has) {
+        delete nextPriorities[k];
+      } else if (!(k in nextPriorities)) {
+        nextPriorities[k] = { priority: "must" };
+      }
+      return { ...r, [arrayKey]: nextArr, productPriorities: nextPriorities };
+    }));
+  };
+  const toggleReleaseArea = useCallback((releaseId: string, areaId: string) => {
+    toggleProductObject(releaseId, "linkedAreaIds", "area", areaId);
+  }, []);
+  const toggleReleaseFeatureGroup = useCallback((releaseId: string, groupId: string) => {
+    toggleProductObject(releaseId, "linkedFeatureGroupIds", "group", groupId);
+  }, []);
   const toggleReleaseFeature = useCallback((releaseId: string, featureId: string) => {
-    setReleases(prev => prev.map(r => r.id === releaseId
-      ? { ...r, linkedFeatureIds: toggleArrayMember(r.linkedFeatureIds, featureId) }
-      : r));
+    toggleProductObject(releaseId, "linkedFeatureIds", "feature", featureId);
   }, []);
   const toggleReleaseSlice = useCallback((releaseId: string, sliceId: string) => {
-    setReleases(prev => prev.map(r => r.id === releaseId
-      ? { ...r, linkedSliceIds: toggleArrayMember(r.linkedSliceIds, sliceId) }
-      : r));
+    toggleProductObject(releaseId, "linkedSliceIds", "slice", sliceId);
   }, []);
   const toggleReleaseCapability = useCallback((releaseId: string, capabilityId: string) => {
-    setReleases(prev => prev.map(r => r.id === releaseId
-      ? { ...r, linkedCapabilityIds: toggleArrayMember(r.linkedCapabilityIds, capabilityId) }
-      : r));
+    toggleProductObject(releaseId, "linkedCapabilityIds", "capability", capabilityId);
+  }, []);
+
+  const setMilestoneObjectPriority = useCallback((releaseId: string, kind: MilestoneObjectKind, objectId: string, priority: MoscowPriority) => {
+    const k = milestoneLinkKey(kind, objectId);
+    setReleases(prev => prev.map(r => {
+      if (r.id !== releaseId) return r;
+      const existing = r.productPriorities[k];
+      return {
+        ...r,
+        productPriorities: {
+          ...r.productPriorities,
+          [k]: { ...(existing ?? {}), priority },
+        },
+      };
+    }));
+  }, []);
+  const setMilestoneObjectNote = useCallback((releaseId: string, kind: MilestoneObjectKind, objectId: string, note: string) => {
+    const k = milestoneLinkKey(kind, objectId);
+    setReleases(prev => prev.map(r => {
+      if (r.id !== releaseId) return r;
+      const existing = r.productPriorities[k] ?? { priority: "must" as MoscowPriority };
+      const trimmed = note.trim();
+      return {
+        ...r,
+        productPriorities: {
+          ...r.productPriorities,
+          [k]: { ...existing, note: trimmed === "" ? undefined : trimmed },
+        },
+      };
+    }));
   }, []);
 
   // ── Themes — CRUD + link toggles ─────────────────────────────────────
@@ -2814,6 +3136,226 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ? { ...t, linkedReleaseIds: toggleArrayMember(t.linkedReleaseIds, releaseId) }
       : t));
   }, []);
+
+  // ── SignalGroups — persistent signal review workspaces ───────────────
+  // Many-to-many with signals. updatedAt is touched on any mutation so
+  // the Groups list panel can sort by "most recently active" if needed
+  // later. Cascade: when a signal is hard-deleted we'd drop it from
+  // groups, but the prototype only soft-closes signals (status flip),
+  // so a closed signal stays in its groups — that matches the spec's
+  // "saved scratchpad" intent (closed signals remain reviewable).
+  const createSignalGroup = useCallback((input: { name: string; signalIds?: string[]; reasons?: SignalGroupReason[]; notes?: string }) => {
+    const id = newId("sg");
+    const now = nowISO();
+    const group: SignalGroup = {
+      id,
+      name: input.name.trim() || "Untitled group",
+      notes: input.notes,
+      status: "open",
+      reasons: input.reasons ?? [],
+      signalIds: input.signalIds ?? [],
+      linkedIntentIds: [],
+      owner: CURRENT_USER_ID,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setSignalGroups(prev => prev.some(g => g.id === id) ? prev : [...prev, group]);
+    return id;
+  }, []);
+  const updateSignalGroup = useCallback((id: string, patch: Partial<SignalGroup>) => {
+    setSignalGroups(prev => prev.map(g => g.id === id
+      ? { ...g, ...patch, updatedAt: nowISO() }
+      : g));
+  }, []);
+  const deleteSignalGroup = useCallback((id: string) => {
+    setSignalGroups(prev => prev.filter(g => g.id !== id));
+  }, []);
+  const addSignalToGroup = useCallback((groupId: string, signalId: string) => {
+    setSignalGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      if (g.signalIds.includes(signalId)) return g;
+      return { ...g, signalIds: [...g.signalIds, signalId], updatedAt: nowISO() };
+    }));
+  }, []);
+  const removeSignalFromGroup = useCallback((groupId: string, signalId: string) => {
+    setSignalGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      if (!g.signalIds.includes(signalId)) return g;
+      return { ...g, signalIds: g.signalIds.filter(sid => sid !== signalId), updatedAt: nowISO() };
+    }));
+  }, []);
+  const addSignalsToGroup = useCallback((groupId: string, signalIds: string[]) => {
+    setSignalGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      const next = Array.from(new Set([...g.signalIds, ...signalIds]));
+      if (next.length === g.signalIds.length) return g;
+      return { ...g, signalIds: next, updatedAt: nowISO() };
+    }));
+  }, []);
+  const openGroup = useCallback((groupId: string | null) => {
+    setSignalGroupFilter(groupId);
+  }, []);
+  const setSignalsViewMode = useCallback((m: "list" | "groups") => {
+    setSignalsViewModeState(m);
+  }, []);
+  const removeSignalsFromGroup = useCallback((groupId: string, signalIds: string[]) => {
+    setSignalGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      const drop = new Set(signalIds);
+      const next = g.signalIds.filter(sid => !drop.has(sid));
+      if (next.length === g.signalIds.length) return g;
+      return { ...g, signalIds: next, updatedAt: nowISO() };
+    }));
+  }, []);
+
+  // ── Draft intents — planning records inside a SignalGroup ───────────
+  const createDraftIntent = useCallback((input: {
+    groupId: string;
+    title: string;
+    description?: string;
+    signalIds: string[];
+    notes?: string;
+    suggestedTasks?: string[];
+    acceptanceCriteria?: string[];
+    context?: string;
+    decisionRationale?: string;
+    rejectedAlternatives?: string;
+    plan?: string;
+  }) => {
+    const id = newId("di");
+    const now = nowISO();
+    const draft: DraftIntent = {
+      id,
+      groupId: input.groupId,
+      title: input.title.trim() || "Untitled draft intent",
+      description: input.description ?? "",
+      signalIds: input.signalIds.slice(),
+      notes: input.notes,
+      suggestedTasks: input.suggestedTasks ?? [],
+      acceptanceCriteria: input.acceptanceCriteria ?? [],
+      context: input.context,
+      decisionRationale: input.decisionRationale,
+      rejectedAlternatives: input.rejectedAlternatives,
+      plan: input.plan,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setDraftIntents(prev => prev.some(d => d.id === id) ? prev : [...prev, draft]);
+    // Touch the group's updatedAt so the panel sorts naturally.
+    setSignalGroups(prev => prev.map(g => g.id === input.groupId ? { ...g, updatedAt: now } : g));
+    return id;
+  }, []);
+  const updateDraftIntent = useCallback((id: string, patch: Partial<Omit<DraftIntent, "id" | "groupId" | "createdAt">>) => {
+    setDraftIntents(prev => prev.map(d => d.id === id
+      ? { ...d, ...patch, updatedAt: nowISO() }
+      : d));
+  }, []);
+  const deleteDraftIntent = useCallback((id: string) => {
+    setDraftIntents(prev => prev.filter(d => d.id !== id));
+  }, []);
+  const finalizeDraftIntent = useCallback((id: string): string | null => {
+    const draft = draftIntents.find(d => d.id === id);
+    if (!draft) return null;
+    if (draft.finalizedWipId) return draft.finalizedWipId;        // already finalized — idempotent
+    if (draft.signalIds.length === 0)             return null;    // need at least one signal to satisfy createWorkItem
+    // Generate the wip id ourselves so we can stamp it on the draft +
+    // the group immediately. createWorkItem accepts an explicit
+    // signalIds list via opts — we pass everything through.
+    const newWipId = `w-${String(wipIdCounter++).padStart(2, "0")}`;
+    // We can't easily call createWorkItem and read its id back since
+    // createWorkItem returns void. Re-implement the minimal slice here.
+    const sourceIds = draft.signalIds;
+    const sourceSignals = signals.filter(s => sourceIds.includes(s.id));
+    if (sourceSignals.length === 0) return null;
+    const now = nowISO();
+    // Copy the structured planning fields straight from the draft so
+    // the new Wip lands fully populated. acceptanceCriteria converts
+    // from `string[]` to `AcceptanceCriterion[]` with done:false (the
+    // Wip side wants per-item ids + done flags). Empty / undefined
+    // fields just don't get set.
+    const acItems: import("./data").AcceptanceCriterion[] =
+      (draft.acceptanceCriteria ?? [])
+        .map(t => t.trim())
+        .filter(Boolean)
+        .map((text, idx) => ({ id: `ac-${newWipId}-${idx}`, text, done: false }));
+    const newWip: Wip = {
+      id: newWipId, type: "intent",
+      title: draft.title.trim() || "Untitled intent",
+      description: draft.description ?? "",
+      column: "to_do",
+      location: sprints.find(s => s.active)?.id || "backlog",
+      assignee: null,
+      linkedSignals: sourceIds.slice(),
+      ...(draft.context              ? { context: draft.context } : {}),
+      ...(acItems.length > 0         ? { acceptanceCriteria: acItems } : {}),
+      ...(draft.decisionRationale    ? { decisionRationale: draft.decisionRationale } : {}),
+      ...(draft.rejectedAlternatives ? { rejectedAlternatives: draft.rejectedAlternatives } : {}),
+      ...(draft.plan                 ? { plan: draft.plan } : {}),
+    };
+    setWipItems(prev => prev.some(w => w.id === newWipId) ? prev : [...prev, newWip]);
+    // Flip every source signal to Ready + add the linkedWip edge — same
+    // side-effects the regular create flow performs.
+    setSignals(prev => prev.map(s => sourceIds.includes(s.id)
+      ? { ...s, status: "ready", statusUpdatedAt: now,
+          linkedWip: s.linkedWip.includes(newWipId) ? s.linkedWip : [...s.linkedWip, newWipId] }
+      : s));
+    // Per-link relationship rows (signal ↔ wip) — partial by default.
+    setSignalWipLinks(prev => {
+      const additions: SignalWipLink[] = sourceSignals
+        .filter(s => !prev.some(l => l.signalId === s.id && l.wipId === newWipId))
+        .map(s => ({
+          id: `link-${Date.now().toString(36)}-${s.id}`,
+          signalId: s.id, wipId: newWipId, relationship: "partially_addresses",
+          createdAt: now, createdBy: CURRENT_USER_ID,
+        }));
+      return additions.length > 0 ? [...prev, ...additions] : prev;
+    });
+    // Stamp the draft as finalized — kept in the list as history.
+    setDraftIntents(prev => prev.map(d => d.id === id
+      ? { ...d, finalizedWipId: newWipId, finalizedAt: now, updatedAt: now }
+      : d));
+    // Link the group to the new intent so the workspace can surface it
+    // in the "Linked intents" section.
+    setSignalGroups(prev => prev.map(g => g.id === draft.groupId
+      ? { ...g,
+          linkedIntentIds: g.linkedIntentIds.includes(newWipId)
+            ? g.linkedIntentIds
+            : [...g.linkedIntentIds, newWipId],
+          updatedAt: now }
+      : g));
+    recordWipEvent({ wipId: newWipId, kind: "created", actor: CURRENT_USER_ID });
+    recordTransaction({
+      // Reuse the generic status_change action since the system already
+      // routes "create" semantics through it for similar flows
+      // (createWorkItem uses the same action). Keeps the transaction
+      // enum stable.
+      action: "status_change",
+      actor: CURRENT_USER_ID,
+      summary: `Finalized draft "${draft.title}" → intent "${newWip.title}"`,
+      affectedSignalIds: sourceIds.slice(),
+      changes: [],
+    });
+    return newWipId;
+  }, [draftIntents, signals, sprints, recordTransaction, recordWipEvent]);
+
+  // Link the group to an EXISTING intent (no draft involved). Each
+  // selected signal also gets linked to the intent via the normal
+  // linkSignalToWip path so the per-signal relationship + Ready flip
+  // happen unchanged.
+  const linkGroupToExistingIntent = useCallback((groupId: string, intentId: string, signalIds: string[]) => {
+    const wip = wipItems.find(w => w.id === intentId);
+    if (!wip || wip.type !== "intent") return;
+    signalIds.forEach(sid => {
+      linkSignalToWip(sid, intentId, "partially_addresses");
+    });
+    setSignalGroups(prev => prev.map(g => g.id === groupId
+      ? { ...g,
+          linkedIntentIds: g.linkedIntentIds.includes(intentId)
+            ? g.linkedIntentIds
+            : [...g.linkedIntentIds, intentId],
+          updatedAt: nowISO() }
+      : g));
+  }, [wipItems, linkSignalToWip]);
 
   const setSliceCapabilityStatus = useCallback((sliceId: string, capabilityId: string, status: SliceCapabilityStatus | null) => {
     setFeatureSlices(prev => prev.map(s => {
@@ -2882,7 +3424,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     signalComments, signalAttachments, signalWipLinks,
     postCreatePrompt, sourceOfWipFilter, roadmapFocus,
     weeklyGoals, productAreas, features, featureSlices, featureGroups, productCapabilities,
-    releases, themes,
+    releases, themes, signalGroups, signalGroupFilter, signalsViewMode, draftIntents,
     duplicateGroups,
     splitView,
     wipEvents, clientPreviousVisitAt,
@@ -2909,8 +3451,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     createProductCapability, updateProductCapability, deleteProductCapability,
     createRelease, updateRelease, deleteRelease,
     toggleReleaseGoal, toggleReleaseFeature, toggleReleaseSlice, toggleReleaseCapability,
+    toggleReleaseArea, toggleReleaseFeatureGroup,
+    setMilestoneObjectPriority, setMilestoneObjectNote,
+    recordMilestoneAudit, cloneRelease,
     createTheme, updateTheme, deleteTheme,
     toggleThemeGoal, toggleThemeIntent, toggleThemeFeature, toggleThemeSlice, toggleThemeCapability, toggleThemeRelease,
+    createSignalGroup, updateSignalGroup, deleteSignalGroup,
+    addSignalToGroup, removeSignalFromGroup, addSignalsToGroup, removeSignalsFromGroup, openGroup, setSignalsViewMode,
+    markSignalsAsDuplicatesOf, closeSignalAsDuplicateOf,
+    createDraftIntent, updateDraftIntent, deleteDraftIntent, finalizeDraftIntent, linkGroupToExistingIntent,
     setSliceCapabilityStatus,
     skipSignal, rejectSignalWithReason, reopenSignalWithReason, reviveSkip,
     openSplitView, closeSplitView,

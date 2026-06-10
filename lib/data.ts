@@ -1174,13 +1174,123 @@ export interface Release {
   targetEnd?: string;
   // Link arrays — all many-to-many. Living on the Release means we
   // don't need to add a `releaseIds` field on every other roadmap
-  // object; reverse lookups are derived ("which releases include
+  // object; reverse lookups are derived ("which milestones include
   // slice X?" = releases.filter(r => r.linkedSliceIds.includes(x))).
+  //
+  // Goals are linked without a priority (goals don't carry MoSCoW).
+  // Product objects (areas, groups, features, slices, capabilities)
+  // can carry a per-milestone MoSCoW priority — see productPriorities.
   linkedGoalIds: string[];
+  linkedAreaIds: string[];
+  linkedFeatureGroupIds: string[];
   linkedFeatureIds: string[];
   linkedSliceIds: string[];
   linkedCapabilityIds: string[];
+  // Per-product-object MoSCoW priority + optional note, scoped to THIS
+  // milestone only. Key format is `${kind}:${objectId}` so one object can
+  // carry different priorities across different milestones, exactly per
+  // the spec ("Bulk status update is Must-have for July 1st Launch but
+  // Should-have for Later Admin Improvements"). MoSCoW DOES NOT cascade
+  // to children — a Must-have feature does not auto-Must-have its
+  // capabilities.
+  productPriorities: Record<string, { priority: MoscowPriority; note?: string }>;
+  // ── Versioning ──────────────────────────────────────────────────────
+  // Milestones are living planning objects — definitions change over
+  // time. We model that with a "family": every milestone belongs to
+  // one. The original milestone IS its own family root (so
+  // versionFamilyId === its own id). Clones / new-versions point back
+  // at the family root via versionFamilyId AND at the specific
+  // milestone they were copied from via versionParentId.
+  //
+  // versionLabel is a short human handle like "v1", "v2", "v3". It's
+  // computed at clone time (max-existing + 1) but stored on the row so
+  // labels stay stable even if siblings get deleted.
+  //
+  // versionSummary is a one-line description of what changed in this
+  // version, used in the version history dropdown (e.g. "Added signal
+  // grouping as Must-have").
+  versionFamilyId: string;
+  versionParentId?: string;
+  versionLabel: string;
+  versionSummary?: string;
+  // Change history — append-only. Every mutating action records an
+  // entry; the milestone detail card renders the latest N. Keeps
+  // lineage legible across versions when the user diff-reads them.
+  auditLog: MilestoneAuditEntry[];
   createdAt: string;
+}
+
+export interface MilestoneAuditEntry {
+  id: string;
+  at: string;     // ISO timestamp
+  // Free-text human-readable summary — always present, used as a
+  // fallback when the structured fields below are missing. Keeps old
+  // entries renderable after the structured shape was added.
+  summary: string;
+  // ── Structured shape (optional, populated for entries created after
+  // the structured-audit refactor). Lets the UI render the entry in a
+  // consistent "what changed · object · before → after" layout.
+  // ────────────────────────────────────────────────────────────────
+  kind?: MilestoneAuditKind;
+  // Human-readable object label — "Capability · Duplicate handling",
+  // "Feature Set · Signal Review Workflow". Not present for entries
+  // that don't reference a specific object (description / status /
+  // date / renamed / created).
+  objectLabel?: string;
+  // Before/after values, both stringified. For MoSCoW changes it's the
+  // priority label ("Must-have" → "Should-have"); for status changes
+  // the status label; for description changes the previous + new text
+  // (truncated when long); for date changes the formatted range. Either
+  // side may be empty to mean "was unset / is unset".
+  previousValue?: string;
+  nextValue?: string;
+  // Reserved for when real auth lands. Omitted in the prototype.
+  actor?: string;
+}
+
+// Discriminator the UI uses to pick a verb + render layout for the
+// audit row. String-literal union so we can extend without a migration.
+export type MilestoneAuditKind =
+  | "created"
+  | "cloned_from"
+  | "cloned_to"
+  | "renamed"
+  | "description_changed"
+  | "status_changed"
+  | "date_changed"
+  | "scope_added"
+  | "scope_removed"
+  | "moscow_changed"
+  | "note_changed"
+  | "goal_linked"
+  | "goal_unlinked";
+
+// MoSCoW priority lives on the milestone link, never on the product
+// object itself. Removed from FeatureSlice's internal capabilityStatus
+// in V1 — slices now describe product scope/version, not milestone
+// readiness.
+export type MoscowPriority = "must" | "should" | "could" | "wont";
+export type MilestoneObjectKind = "area" | "group" | "feature" | "slice" | "capability";
+
+export const MOSCOW_LABEL: Record<MoscowPriority, string> = {
+  must:   "Must-have",
+  should: "Should-have",
+  could:  "Could-have",
+  wont:   "Won't-have",
+};
+
+export const MILESTONE_OBJECT_KIND_LABEL: Record<MilestoneObjectKind, string> = {
+  area:       "Capability Area",
+  group:      "Feature Set",
+  feature:    "Feature",
+  slice:      "Feature Slice",
+  capability: "Capability",
+};
+
+// Composite key helper for productPriorities lookups. Centralised so
+// both the seed file + the store + the UI never disagree on the format.
+export function milestoneLinkKey(kind: MilestoneObjectKind, objectId: string): string {
+  return `${kind}:${objectId}`;
 }
 
 export const RELEASES: Release[] = [
@@ -1195,10 +1305,29 @@ export const RELEASES: Release[] = [
     status: "planned",
     targetStart: mondayISO(7),
     targetEnd:   mondayISO(28),
-    linkedGoalIds:       ["goal-w-auth"],
-    linkedFeatureIds:    ["feat-register-email"],
-    linkedSliceIds:      ["slice-beta-registration"],
-    linkedCapabilityIds: ["cap-email-validation", "cap-email-verification", "cap-duplicate-email"],
+    linkedGoalIds:         ["goal-w-auth"],
+    linkedAreaIds:         [],
+    linkedFeatureGroupIds: [],
+    linkedFeatureIds:      ["feat-register-email"],
+    linkedSliceIds:        ["slice-beta-registration"],
+    linkedCapabilityIds:   ["cap-email-validation", "cap-email-verification", "cap-duplicate-email"],
+    // MoSCoW per-link: validation + verification are must-haves to ship
+    // the beta cohort safely; duplicate-email handling is a should-have
+    // (we can ship without it but the cohort UX is rough). The feature
+    // and slice themselves are must-have shippable scopes.
+    productPriorities: {
+      "feature:feat-register-email":       { priority: "must"   },
+      "slice:slice-beta-registration":     { priority: "must",   note: "Smallest viable scope for the beta." },
+      "capability:cap-email-validation":   { priority: "must"   },
+      "capability:cap-email-verification": { priority: "must"   },
+      "capability:cap-duplicate-email":    { priority: "should", note: "Rough UX without it; not a launch blocker." },
+    },
+    versionFamilyId: "rel-private-beta",
+    versionLabel: "v1",
+    versionSummary: "Initial draft",
+    auditLog: [
+      { id: "audit-seed-1", at: daysAgo(5), summary: "Created milestone — Private Beta · v1", kind: "created" },
+    ],
     createdAt: daysAgo(5),
   },
 ];
@@ -1250,6 +1379,136 @@ export const THEMES: RoadmapTheme[] = [
     linkedCapabilityIds: ["cap-email-verification"],
     linkedReleaseIds:    ["rel-private-beta"],
     createdAt: daysAgo(4),
+  },
+];
+
+// ── Signal Groups ───────────────────────────────────────────────────────
+// Persistent, user-curated "workspaces" of related signals. NOT the same
+// as duplicate groups (those are de-duplication candidates the system
+// suggests), NOT themes (those are cross-cutting overlay tags), NOT
+// milestones, and NOT intents. A SignalGroup is purely a saved scratchpad
+// the user assembled while reviewing related feedback — same theme,
+// same client, same bug, etc.
+//
+// Many-to-many: one signal can sit in multiple groups (e.g. a mobile
+// dashboard bug can belong to "Mobile responsiveness issues" AND
+// "Client dashboard bugs" AND "Ecomedes feedback" at the same time).
+export type SignalGroupStatus = "open" | "in_review" | "archived";
+
+// Group reason vocabulary, deliberately small. Stored as a list so the
+// user can apply more than one ("same client" + "same bug"). Use "other"
+// when none of the prebuilt reasons fit.
+export type SignalGroupReason =
+  | "same_theme"
+  | "same_client"
+  | "same_feature"
+  | "same_feature_set"
+  | "same_bug"
+  | "duplicate_feedback"
+  | "same_action"
+  | "other";
+
+export const SIGNAL_GROUP_REASON_LABEL: Record<SignalGroupReason, string> = {
+  same_theme:         "Same theme / context",
+  same_client:        "Same client",
+  same_feature:       "Same feature",
+  same_feature_set:   "Same feature set",
+  same_bug:           "Same bug",
+  duplicate_feedback: "Duplicate / repeated feedback",
+  same_action:        "Same action needed",
+  other:              "Other",
+};
+
+export const SIGNAL_GROUP_STATUS_LABEL: Record<SignalGroupStatus, string> = {
+  open:       "Open",
+  in_review:  "In review",
+  archived:   "Archived",
+};
+
+export interface SignalGroup {
+  id: string;
+  name: string;
+  notes?: string;
+  status: SignalGroupStatus;
+  reasons: SignalGroupReason[];   // multi-select, can be empty
+  signalIds: string[];            // many-to-many membership
+  // Intents this group is connected to. Populated when the user
+  // finalizes a draft intent (the new wip id lands here) or when the
+  // user explicitly links the group to an existing intent. Drafts
+  // themselves live in `DraftIntent` records — see below.
+  linkedIntentIds: string[];
+  owner?: string;                 // user id of the creator
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Draft intents ───────────────────────────────────────────────────────
+// Draft intents are PLANNING-ONLY records. The team uses them inside a
+// SignalGroup workspace to draft work before committing to a real
+// intent. They are NOT visible on the Kanban (only finalized intents
+// reach the WIP board). They DO NOT auto-close signals or auto-create
+// final intents.
+//
+// Lifecycle:
+//   1. User selects signals in the group + creates a DraftIntent.
+//   2. User edits title / description / signalIds / notes / tasks.
+//   3. User clicks "Finalize" → store calls createWorkItem to create a
+//      real Wip (intent) using the draft's fields; the draft record is
+//      KEPT and stamped with finalizedWipId so the group can show the
+//      "finalized from draft" history.
+//
+// Multiple drafts per group are supported — one group can produce many
+// intents. The draft list outlives the group too if needed: store
+// cascades drop drafts when a group is deleted, but archiving the
+// group leaves drafts alone.
+export interface DraftIntent {
+  id: string;
+  groupId: string;                  // parent SignalGroup
+  title: string;
+  description: string;              // Summary / Notes — the equivalent of Wip.description
+  signalIds: string[];              // signals from the group that motivate this draft
+  notes?: string;                   // free-text scratchpad, separate from description
+  suggestedTasks: string[];         // optional, plain-string list to seed task creation later
+  // ── Structured planning fields — mirror Wip.<field> so a user can
+  // prepare a "real-shape" intent before finalizing. On finalize these
+  // copy verbatim onto the new Wip; acceptanceCriteria converts from
+  // string[] (one per line in the draft modal) into
+  // AcceptanceCriterion[] with done:false.
+  context?: string;
+  acceptanceCriteria: string[];
+  decisionRationale?: string;
+  rejectedAlternatives?: string;
+  plan?: string;
+  // Set ONLY after the user finalizes — points at the real Wip's id.
+  // Drafts with this field set render as "Finalized" rows in the group
+  // workspace and can't be further edited (we don't want planning data
+  // and shipped data drifting).
+  finalizedWipId?: string;
+  finalizedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// No seeded drafts in V1 — the workflow is "user creates as needed".
+// We still export an empty array so the store imports cleanly.
+export const DRAFT_INTENTS: DraftIntent[] = [];
+
+export const SIGNAL_GROUPS: SignalGroup[] = [
+  // Demo group so the Groups panel isn't empty on first load. Uses the
+  // first three accepted/bug-flavoured seed signals as a starting set —
+  // good cross-section to demonstrate that grouping is independent of
+  // status / source.
+  {
+    id: "sg-mobile-responsive",
+    name: "Mobile responsiveness issues",
+    notes: "Aggregated feedback about layout breakage and unusable controls on smaller viewports.",
+    status: "open",
+    reasons: ["same_theme", "same_bug"],
+    signalIds: ["s11", "s13", "s15"],
+    linkedIntentIds: [],
+    owner: "u1",
+    createdAt: daysAgo(3),
+    updatedAt: daysAgo(1),
   },
 ];
 

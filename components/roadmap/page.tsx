@@ -4,7 +4,8 @@ import { useStore } from "@/lib/store";
 import {
   WeeklyGoal, WeeklyGoalStatus, ProductArea, Feature, FeatureStatus, FeatureSlice,
   FeatureGroup, ProductCapability, SliceCapabilityStatus,
-  Release, ReleaseStatus, RoadmapTheme, RoadmapThemeColor,
+  Release, ReleaseStatus, MilestoneAuditEntry, MilestoneAuditKind, RoadmapTheme, RoadmapThemeColor,
+  MoscowPriority, MilestoneObjectKind, MOSCOW_LABEL, MILESTONE_OBJECT_KIND_LABEL, milestoneLinkKey,
   Wip, userById,
 } from "@/lib/data";
 import { Plus, X, ChevronDown, ChevronRight, Check, Task, Intent } from "@/components/ui/icons";
@@ -30,6 +31,22 @@ type RoadmapTab = "weekly" | "product" | "releases" | "themes";
 // (so re-enabling is a one-line flip), but the tab, pills, and pickers
 // don't render while this is false.
 const THEMES_ENABLED = false;
+
+// Shape for one product-object link inside a milestone, used by both
+// ReleaseCard's bucketing logic and the MoscowGroup row renderer.
+type MilestoneRow = {
+  kind: MilestoneObjectKind;
+  objectId: string;
+  title: string;
+  parentTitle?: string;
+  priority: MoscowPriority;
+  note?: string;
+  onOpen?: () => void;
+  onUnlink: () => void;
+  // Weekly goals that also link this product object. Surfaced inline
+  // on the row so the user can see which goal motivates a Must-have.
+  linkedGoals: WeeklyGoal[];
+};
 
 export function RoadmapPage() {
   const { roadmapFocus, setRoadmapFocus } = useStore();
@@ -84,7 +101,7 @@ export function RoadmapPage() {
           <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
             {tab === "weekly" ? "Weekly goals"
               : tab === "product" ? "Product view"
-              : tab === "releases" ? "Releases"
+              : tab === "releases" ? "Milestones"
               : "Themes"}
           </span>
           <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
@@ -93,7 +110,7 @@ export function RoadmapPage() {
               : tab === "product"
                 ? "· Browse product capability areas, features, and slices"
                 : tab === "releases"
-                  ? "· Package goals, features, slices, and capabilities you plan to ship together"
+                  ? "· Define what needs to be ready for a business target — e.g. July 1st Launch"
                   : "· Cross-cutting tags that overlay the roadmap without changing the hierarchy"}
           </span>
           <span style={{ flex: 1 }} />
@@ -115,7 +132,7 @@ export function RoadmapPage() {
               >
                 {t === "weekly" ? "Weekly goals"
                   : t === "product" ? "Product view"
-                  : t === "releases" ? "Releases"
+                  : t === "releases" ? "Milestones"
                   : "Themes"}
               </button>
             ))}
@@ -651,9 +668,9 @@ function WeeklyGoalsFilterBar({
           value={filters.releaseId ?? ""}
           onChange={e => onChange({ releaseId: e.target.value || null })}
           style={selectStyle(filters.releaseId !== null)}
-          aria-label="Filter by release"
+          aria-label="Filter by milestone"
         >
-          <option value="">All releases</option>
+          <option value="">All milestones</option>
           {releases.map(r => (
             <option key={r.id} value={r.id}>{r.title}</option>
           ))}
@@ -749,6 +766,13 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
   const [titleDraft, setTitleDraft] = useState(goal.title);
   const [editingNotes, setEditingNotes] = useState(false);
   const [notesDraft, setNotesDraft] = useState(goal.notes ?? "");
+  // Collapsed vs expanded card. Collapsed (default) is the
+  // content-first summary — title, status, milestone, product + intent
+  // summary, optional notes excerpt. Expanding reveals the deeper
+  // structure (feature editor, slice / capability / intent pickers,
+  // notes editor). The card itself doesn't change shape; expansion
+  // just unfolds details inline beneath the summary.
+  const [expanded, setExpanded] = useState(false);
 
   // V1 progress hint only counts linked intents — features are planning
   // labels and don't have a runtime status the team agrees on yet, so
@@ -774,28 +798,58 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
     .filter(t => t.linkedGoalIds.includes(goal.id))
     .map(t => t.id);
 
+  // ── Derived data for the compact summary ──────────────────────────
+  // The card leads with the most-relevant link of each kind so the
+  // user can scan "what is this goal about" without reading three
+  // labelled sections. Falls back through Feature → Slice → Capability
+  // for product context (whichever is linked first).
+  const linkedFeaturesForGoal = features.filter(f => goal.linkedFeatureIds.includes(f.id));
+  const primaryProduct: { label: string; onOpen: () => void } | null =
+    linkedFeaturesForGoal[0]
+      ? {
+          label: linkedFeaturesForGoal[0].title,
+          onOpen: () => setRoadmapFocus({ tab: "product", featureId: linkedFeaturesForGoal[0].id }),
+        }
+      : linkedSlices[0]
+        ? {
+            label: linkedSlices[0].title,
+            onOpen: () => setRoadmapFocus({ tab: "product", featureId: linkedSlices[0].featureId, sliceId: linkedSlices[0].id }),
+          }
+        : linkedCapabilities[0]
+          ? {
+              label: linkedCapabilities[0].title,
+              onOpen: () => setRoadmapFocus({ tab: "product", featureId: linkedCapabilities[0].featureId }),
+            }
+          : null;
+  const milestoneTitles = releases
+    .filter(r => releaseIdsForGoal.includes(r.id))
+    .map(r => r.title);
+  const hasAnyMeta = !!primaryProduct || milestoneTitles.length > 0;
+  const stripeColor =
+    goal.status === "done" ? "var(--status-accepted)" :
+    goal.status === "in_progress" ? "#f59e0b" :
+    "var(--accent)";
+
   return (
     <div
       data-goal-id={goal.id}
       style={{
-        padding: "12px 14px",
+        padding: "14px 16px",
         background: "var(--bg)",
-        // React warns when a `border` shorthand and a `borderLeft`
-        // override coexist on the same element (the shorthand can
-        // clobber the override during re-renders). Split into the
-        // three non-left sides + an explicit `borderLeft` to keep
-        // the colored status stripe authoritative.
         borderTop:    focused ? "1px solid var(--accent)" : "1px solid var(--border)",
         borderRight:  focused ? "1px solid var(--accent)" : "1px solid var(--border)",
         borderBottom: focused ? "1px solid var(--accent)" : "1px solid var(--border)",
-        borderLeft: `3px solid ${goal.status === "done" ? "var(--status-accepted)" : goal.status === "in_progress" ? "#f59e0b" : "var(--accent)"}`,
+        borderLeft: `3px solid ${stripeColor}`,
         borderRadius: "var(--radius-lg)",
         boxShadow: focused ? "0 0 0 3px rgba(56, 132, 255, 0.18)" : undefined,
         display: "flex", flexDirection: "column", gap: 8,
         transition: "box-shadow 0.25s ease, border-color 0.25s ease",
       }}>
-      {/* Title + status */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+      {/* HEADER — title + status only. No chevron, no delete X here so
+          the card reads as content (not as a row of controls). The
+          colored left stripe already encodes status visually; the
+          status pill on the right confirms it in words. */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         {editingTitle ? (
           <input
             autoFocus
@@ -809,7 +863,7 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
             style={{
               flex: 1, border: "1px solid var(--accent)",
               borderRadius: "var(--radius)",
-              padding: "4px 6px", fontSize: "var(--fs-body)", fontWeight: 600,
+              padding: "4px 6px", fontSize: 14, fontWeight: 600,
               color: "var(--text)", background: "var(--bg)", outline: "none",
             }}
           />
@@ -819,10 +873,10 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
             style={{
               flex: 1, textAlign: "left",
               background: "transparent", border: "none", padding: 0,
-              fontSize: "var(--fs-body)", fontWeight: 600,
+              fontSize: 14, fontWeight: 600,
               color: "var(--text)", cursor: "text", lineHeight: 1.35,
             }}
-            title="Click to edit"
+            title="Click to rename"
           >
             {goal.title}
           </button>
@@ -831,173 +885,445 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
           status={goal.status}
           onChange={(s) => updateWeeklyGoal(goal.id, { status: s })}
         />
-        <button
-          onClick={() => { if (window.confirm("Delete this goal?")) deleteWeeklyGoal(goal.id); }}
-          aria-label="Delete goal"
+      </div>
+
+      {/* DESCRIPTION — plain secondary paragraph when notes are
+          present. Only shown collapsed (the expanded panel renders the
+          editor instead). No box, no label — let the text speak. */}
+      {!expanded && goal.notes && (
+        <p
           style={{
-            padding: 4, color: "var(--text-tertiary)",
-            background: "transparent", border: "none", cursor: "pointer",
-            borderRadius: "var(--radius-sm)",
+            margin: 0,
+            fontSize: 12.5, color: "var(--text-secondary)",
+            lineHeight: 1.55,
+            display: "-webkit-box",
+            WebkitLineClamp: 2 as unknown as number,
+            WebkitBoxOrient: "vertical" as const,
+            overflow: "hidden",
           }}
-          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+        >
+          {goal.notes}
+        </p>
+      )}
+
+      {/* META LINE — single compact line of context. Each piece is
+          optional; missing ones are simply omitted so the card never
+          shows empty labels. Uses soft dot separators between pieces;
+          falls back to a quiet "Add details" CTA when nothing is
+          linked. Hidden when the card is expanded — the expanded
+          panel provides richer affordances for the same data. */}
+      {!expanded && (
+        hasAnyMeta ? (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+            fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5,
+          }}>
+            {primaryProduct && (
+              <button
+                onClick={primaryProduct.onOpen}
+                title="Open in Product view"
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500,
+                  cursor: "pointer", textAlign: "left",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  maxWidth: 220,
+                }}
+              >
+                {primaryProduct.label}
+              </button>
+            )}
+            {primaryProduct && milestoneTitles.length > 0 && <span>·</span>}
+            {milestoneTitles.length > 0 && (
+              <button
+                onClick={() => setRoadmapFocus({ tab: "releases" })}
+                title={milestoneTitles.length === 1
+                  ? `Open milestone · ${milestoneTitles[0]}`
+                  : `Open milestones · ${milestoneTitles.join(", ")}`}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500,
+                  cursor: "pointer", textAlign: "left",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  maxWidth: 200,
+                }}
+              >
+                {milestoneTitles[0]}
+                {milestoneTitles.length > 1 && (
+                  <span style={{ color: "var(--text-tertiary)" }}> +{milestoneTitles.length - 1}</span>
+                )}
+              </button>
+            )}
+          </div>
+        ) : !goal.notes && (
+          <button
+            onClick={() => setExpanded(true)}
+            style={{
+              alignSelf: "flex-start",
+              background: "transparent", border: "none", padding: 0,
+              fontSize: 11.5, color: "var(--text-tertiary)",
+              cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.color = "var(--text-secondary)")}
+            onMouseLeave={e => (e.currentTarget.style.color = "var(--text-tertiary)")}
+            title="Open details to add a description, milestone, or links"
+          >
+            Add description, milestone, or links
+          </button>
+        )
+      )}
+
+      {/* FOOTER — small right-aligned Details toggle. Sits at the
+          bottom of the collapsed card so the eye reads
+          content-first, controls-second. */}
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={() => setExpanded(e => !e)}
+          aria-expanded={expanded}
+          title={expanded ? "Hide details" : "Show details"}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            padding: "2px 6px", borderRadius: "var(--radius-sm)",
+            background: "transparent", border: "none",
+            color: "var(--text-tertiary)",
+            fontSize: 11, fontWeight: 500, cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
           onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
         >
-          <X size={11} />
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          Details
         </button>
       </div>
 
-      {/* Progress hint (informational — does NOT auto-change goal status) */}
-      {totalLinked > 0 && (
-        <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-          {doneItems} of {totalLinked} linked intent{totalLinked === 1 ? "" : "s"} done
-        </div>
-      )}
-
-      {/* Linked Product Targets — three reusable link surfaces under one
-          container so the goal can reach broad features OR concrete
-          slices / capabilities. Slices + capabilities open the Product
-          View focused on their parent feature. */}
-      <div style={{
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius)",
-        background: "var(--bg-sunken)",
-        padding: "8px 10px",
-        display: "flex", flexDirection: "column", gap: 10,
-      }}>
+      {expanded && (
         <div style={{
-          display: "flex", alignItems: "center", gap: 6,
-          fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
-          textTransform: "uppercase", color: "var(--text-tertiary)",
+          // Thin top separator so the expanded section reads as a
+          // continuation of the card, not a separate boxed panel.
+          marginTop: 2,
+          paddingTop: 12,
+          borderTop: "1px dashed var(--border)",
+          display: "flex", flexDirection: "column", gap: 12,
         }}>
-          Linked Product Targets
-          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, fontSize: 10.5 }}>
-            · features, slices, or capabilities
-          </span>
+          {/* Notes editor at the TOP — sits right under the title so
+              the description is the first thing the user sees and
+              edits when they open details. */}
+          <div>
+            {editingNotes ? (
+              <textarea
+                autoFocus
+                value={notesDraft}
+                onChange={e => setNotesDraft(e.target.value)}
+                onBlur={() => { updateWeeklyGoal(goal.id, { notes: notesDraft }); setEditingNotes(false); }}
+                rows={2}
+                placeholder="Describe the goal (optional)…"
+                style={{
+                  width: "100%", boxSizing: "border-box",
+                  padding: "6px 8px", border: "1px solid var(--accent)",
+                  borderRadius: "var(--radius)", background: "var(--bg)",
+                  color: "var(--text)", fontSize: 12.5, lineHeight: 1.5, outline: "none",
+                }}
+              />
+            ) : goal.notes ? (
+              <button
+                onClick={() => { setNotesDraft(goal.notes ?? ""); setEditingNotes(true); }}
+                style={{
+                  width: "100%", textAlign: "left",
+                  padding: "6px 8px", border: "1px solid var(--border)",
+                  borderRadius: "var(--radius)", background: "var(--bg)",
+                  color: "var(--text-secondary)", fontSize: 12.5, lineHeight: 1.5,
+                  cursor: "text",
+                }}
+                title="Click to edit description"
+              >
+                {goal.notes}
+              </button>
+            ) : (
+              <button
+                onClick={() => { setNotesDraft(""); setEditingNotes(true); }}
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "3px 6px", fontSize: 11, color: "var(--text-tertiary)",
+                  background: "transparent", border: "1px dashed var(--border)",
+                  borderRadius: "var(--radius)", cursor: "pointer",
+                }}
+              >
+                + Add description
+              </button>
+            )}
+          </div>
+
+          {/* Milestone — single inline row, no uppercase label. */}
+          {releaseIdsForGoal.length > 0 && (
+            <ReleaseRefList releaseIds={releaseIdsForGoal} label="Milestone" />
+          )}
+
+          {/* Feature — typed input, persists across goals. */}
+          <FeatureInlineEditor goal={goal} />
+
+          {/* Feature slices */}
+          <LinkedSection
+            title="Slices"
+            items={linkedSlices.map(s => {
+              const parent = features.find(f => f.id === s.featureId);
+              return {
+                id: s.id, label: s.title,
+                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+                onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
+                onRemove: () => toggleGoalSlice(goal.id, s.id),
+              };
+            })}
+            addPicker={
+              <SlicePicker
+                value={goal.linkedSliceIds}
+                onToggle={(id) => toggleGoalSlice(goal.id, id)}
+              />
+            }
+          />
+
+          {/* Product capabilities */}
+          <LinkedSection
+            title="Capabilities"
+            items={linkedCapabilities.map(c => {
+              const parent = features.find(f => f.id === c.featureId);
+              return {
+                id: c.id, label: c.title,
+                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
+                onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
+                onRemove: () => toggleGoalCapability(goal.id, c.id),
+              };
+            })}
+            addPicker={
+              <CapabilityPicker
+                value={goal.linkedCapabilityIds}
+                onToggle={(id) => toggleGoalCapability(goal.id, id)}
+              />
+            }
+          />
+
+          {/* Intents */}
+          <LinkedSection
+            title="Intents"
+            items={linkedIntents.map(w => ({
+              id: w.id, label: w.title,
+              right: <span style={pillStyle(intentColumnAsStatus(w))}>{intentColumnLabel(w)}</span>,
+              onOpen: () => { setRoute("wip"); openWip(w.id); },
+              onRemove: () => toggleGoalIntent(goal.id, w.id),
+            }))}
+            addPicker={
+              <IntentPicker
+                value={goal.linkedIntentIds}
+                onToggle={(id) => toggleGoalIntent(goal.id, id)}
+              />
+            }
+          />
+
+          {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
+          {THEMES_ENABLED && (
+            <ThemeRefList
+              themeIds={themeIdsForGoal}
+              onPick={(themeId) => toggleThemeGoal(themeId, goal.id)}
+              pickerSelected={themeIdsForGoal}
+            />
+          )}
+
+          {/* Destructive action — deliberate text button at the bottom
+              of the expanded panel, NOT a tiny X in the header. Lives
+              alongside management so a client-viewer never sees it on
+              the collapsed card. */}
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              onClick={() => { if (window.confirm("Delete this goal?")) deleteWeeklyGoal(goal.id); }}
+              style={{
+                padding: "3px 8px", borderRadius: "var(--radius-sm)",
+                background: "transparent", border: "none",
+                color: "var(--text-tertiary)",
+                fontSize: 11, fontWeight: 500, cursor: "pointer",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--danger, #b91c1c)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+            >
+              Delete goal
+            </button>
+          </div>
         </div>
-
-        {/* Feature — typed input, persists across goals. */}
-        <FeatureInlineEditor goal={goal} />
-
-        {/* Feature slices */}
-        <LinkedSection
-          title="Feature slices"
-          items={linkedSlices.map(s => {
-            const parent = features.find(f => f.id === s.featureId);
-            return {
-              id: s.id, label: s.title,
-              right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-              onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
-            };
-          })}
-          addPicker={
-            <SlicePicker
-              value={goal.linkedSliceIds}
-              onToggle={(id) => toggleGoalSlice(goal.id, id)}
-            />
-          }
-          emptyHint="No feature slices linked yet."
-        />
-
-        {/* Product capabilities */}
-        <LinkedSection
-          title="Product capabilities"
-          items={linkedCapabilities.map(c => {
-            const parent = features.find(f => f.id === c.featureId);
-            return {
-              id: c.id, label: c.title,
-              right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-              onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
-            };
-          })}
-          addPicker={
-            <CapabilityPicker
-              value={goal.linkedCapabilityIds}
-              onToggle={(id) => toggleGoalCapability(goal.id, id)}
-            />
-          }
-          emptyHint="No product capabilities linked yet."
-        />
-      </div>
-
-      {/* Linked intents — kept as a separate section to reinforce that
-          intents are LINKED (many-to-many), not children of the goal. */}
-      <LinkedSection
-        title="Linked intents"
-        items={linkedIntents.map(w => ({
-          id: w.id, label: w.title,
-          right: <span style={pillStyle(intentColumnAsStatus(w))}>{intentColumnLabel(w)}</span>,
-          onOpen: () => { setRoute("wip"); openWip(w.id); },
-        }))}
-        addPicker={
-          <IntentPicker
-            value={goal.linkedIntentIds}
-            onToggle={(id) => toggleGoalIntent(goal.id, id)}
-          />
-        }
-        emptyHint="No intents linked yet."
-      />
-
-      {/* Read-only cross-reference: releases that package this goal.
-          Linking happens on the Release card; this row just makes the
-          connection visible from the goal side. */}
-      {releaseIdsForGoal.length > 0 && (
-        <ReleaseRefList releaseIds={releaseIdsForGoal} />
       )}
-
-      {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
-      {THEMES_ENABLED && (
-        <ThemeRefList
-          themeIds={themeIdsForGoal}
-          onPick={(themeId) => toggleThemeGoal(themeId, goal.id)}
-          pickerSelected={themeIdsForGoal}
-        />
-      )}
-
-      {/* Notes — collapsed to a click-to-edit row to keep the card compact. */}
-      <div>
-        {editingNotes ? (
-          <textarea
-            autoFocus
-            value={notesDraft}
-            onChange={e => setNotesDraft(e.target.value)}
-            onBlur={() => { updateWeeklyGoal(goal.id, { notes: notesDraft }); setEditingNotes(false); }}
-            rows={2}
-            placeholder="Notes (optional)…"
-            style={{
-              width: "100%", boxSizing: "border-box",
-              padding: "6px 8px", border: "1px solid var(--accent)",
-              borderRadius: "var(--radius)", background: "var(--bg)",
-              color: "var(--text)", fontSize: 12, lineHeight: 1.5, outline: "none",
-            }}
-          />
-        ) : goal.notes ? (
-          <button
-            onClick={() => { setNotesDraft(goal.notes ?? ""); setEditingNotes(true); }}
-            style={{
-              width: "100%", textAlign: "left",
-              padding: "6px 8px", border: "1px solid var(--border)",
-              borderRadius: "var(--radius)", background: "var(--bg-sunken)",
-              color: "var(--text-secondary)", fontSize: 12, lineHeight: 1.5,
-              cursor: "text",
-            }}
-            title="Click to edit notes"
-          >
-            {goal.notes}
-          </button>
-        ) : (
-          <button
-            onClick={() => { setNotesDraft(""); setEditingNotes(true); }}
-            style={{
-              padding: "2px 4px", fontSize: 11, color: "var(--text-tertiary)",
-              background: "transparent", border: "none", cursor: "pointer",
-            }}
-          >
-            + Add notes
-          </button>
-        )}
-      </div>
     </div>
   );
+}
+
+// ── GoalReviewSummary ───────────────────────────────────────────────────
+// Compact, content-first body shown on a goal card while it's in Review
+// mode. Replaces the heavy "Linked Product Targets" / "Linked intents"
+// section blocks with one or two-line summaries so the title + status
+// stay the visual anchor. Click-throughs still work (feature → product
+// view; intent → wip modal) so review isn't a dead end.
+function GoalReviewSummary({
+  goal, linkedFeatures, linkedSlices, linkedCapabilities, linkedIntents,
+  doneIntents, onOpenIntent, onOpenFeature, onOpenConfigure,
+}: {
+  goal: WeeklyGoal;
+  linkedFeatures: Feature[];
+  linkedSlices: FeatureSlice[];
+  linkedCapabilities: ProductCapability[];
+  linkedIntents: Wip[];
+  doneIntents: number;
+  onOpenIntent: (id: string) => void;
+  onOpenFeature: (id: string) => void;
+  onOpenConfigure: () => void;
+}) {
+  const totalLinked = linkedIntents.length;
+  const primaryFeature = linkedFeatures[0] ?? null;
+  const hasProductScope =
+    linkedFeatures.length > 0 ||
+    linkedSlices.length > 0 ||
+    linkedCapabilities.length > 0;
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 6,
+      padding: "6px 0 0",
+    }}>
+      {/* Product row — leads with the primary feature name (clickable);
+          extra counts are summarised inline so the user doesn't have to
+          scan three labelled sections. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+        fontSize: 11.5, lineHeight: 1.5,
+      }}>
+        <span style={reviewLabelStyle()}>Product</span>
+        {hasProductScope ? (
+          <>
+            {primaryFeature ? (
+              <button
+                onClick={() => onOpenFeature(primaryFeature.id)}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  fontSize: 11.5, fontWeight: 500, color: "var(--text)",
+                  cursor: "pointer", textAlign: "left",
+                }}
+                title="Open in Product view"
+              >
+                {primaryFeature.title}
+              </button>
+            ) : linkedSlices.length > 0 ? (
+              <button
+                onClick={() => onOpenFeature(linkedSlices[0].featureId)}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  fontSize: 11.5, fontWeight: 500, color: "var(--text)",
+                  cursor: "pointer", textAlign: "left",
+                }}
+                title="Open the parent feature in Product view"
+              >
+                {linkedSlices[0].title}
+              </button>
+            ) : linkedCapabilities.length > 0 ? (
+              <button
+                onClick={() => onOpenFeature(linkedCapabilities[0].featureId)}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  fontSize: 11.5, fontWeight: 500, color: "var(--text)",
+                  cursor: "pointer", textAlign: "left",
+                }}
+                title="Open the parent feature in Product view"
+              >
+                {linkedCapabilities[0].title}
+              </button>
+            ) : null}
+            <span style={reviewSecondaryStyle()}>
+              · {linkedFeatures.length} feature{linkedFeatures.length === 1 ? "" : "s"}
+              {" · "}
+              {linkedSlices.length} slice{linkedSlices.length === 1 ? "" : "s"}
+              {" · "}
+              {linkedCapabilities.length} capabilit{linkedCapabilities.length === 1 ? "y" : "ies"}
+            </span>
+          </>
+        ) : (
+          <span style={reviewSecondaryStyle()}>
+            No product targets yet ·{" "}
+            <button
+              onClick={onOpenConfigure}
+              style={{
+                background: "transparent", border: "none", padding: 0,
+                color: "var(--accent)", fontSize: 11.5, cursor: "pointer",
+                textDecoration: "underline",
+              }}
+            >link some</button>
+          </span>
+        )}
+      </div>
+
+      {/* Intents row — "3 linked · 1 done". First intent is clickable
+          so the user can jump straight into the most-relevant work. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+        fontSize: 11.5, lineHeight: 1.5,
+      }}>
+        <span style={reviewLabelStyle()}>Intents</span>
+        {totalLinked > 0 ? (
+          <>
+            <span style={{ fontWeight: 500, color: "var(--text)" }}>
+              {totalLinked} linked
+            </span>
+            <span style={reviewSecondaryStyle()}>· {doneIntents} done</span>
+            {linkedIntents[0] && (
+              <>
+                <span style={reviewSecondaryStyle()}>·</span>
+                <button
+                  onClick={() => onOpenIntent(linkedIntents[0].id)}
+                  style={{
+                    background: "transparent", border: "none", padding: 0,
+                    fontSize: 11.5, color: "var(--text-secondary)",
+                    cursor: "pointer", textAlign: "left",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    maxWidth: 220,
+                  }}
+                  title={linkedIntents[0].title}
+                >
+                  {linkedIntents[0].title}
+                </button>
+                {linkedIntents.length > 1 && (
+                  <span style={reviewSecondaryStyle()}>+{linkedIntents.length - 1} more</span>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <span style={reviewSecondaryStyle()}>None linked yet</span>
+        )}
+      </div>
+
+      {/* Notes — only renders when present; click "Configure" to edit. */}
+      {goal.notes && (
+        <div style={{
+          fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.55,
+          padding: "4px 6px",
+          background: "var(--bg-sunken)",
+          borderRadius: "var(--radius)",
+          border: "1px solid var(--border)",
+          overflow: "hidden", textOverflow: "ellipsis",
+          display: "-webkit-box", WebkitLineClamp: 3 as unknown as number, WebkitBoxOrient: "vertical" as const,
+        }}>
+          {goal.notes}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function reviewLabelStyle(): React.CSSProperties {
+  return {
+    fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+    textTransform: "uppercase", color: "var(--text-tertiary)",
+    whiteSpace: "nowrap",
+  };
+}
+function reviewSecondaryStyle(): React.CSSProperties {
+  return {
+    fontSize: 11, color: "var(--text-tertiary)",
+  };
 }
 
 function intentColumnAsStatus(w: Wip): "planned" | "in_progress" | "done" | "not_started" {
@@ -1022,18 +1348,27 @@ function LinkedSection({
   title, items, addPicker, emptyHint,
 }: {
   title: string;
-  items: { id: string; label: string; right?: React.ReactNode; onOpen?: () => void }[];
+  items: {
+    id: string;
+    label: string;
+    right?: React.ReactNode;
+    onOpen?: () => void;
+    // Inline unlink — when provided, each row renders an X on the
+    // right that directly removes the link. Removes the round-trip
+    // through the picker just to toggle one item off.
+    onRemove?: () => void;
+  }[];
   addPicker: React.ReactNode;
   emptyHint?: string;
 }) {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+        <span style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
           {title}
         </span>
         {items.length > 0 && (
-          <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>· {items.length}</span>
+          <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>· {items.length}</span>
         )}
         <span style={{ flex: 1 }} />
         {addPicker}
@@ -1074,6 +1409,23 @@ function LinkedSection({
                 </span>
               )}
               {it.right}
+              {it.onRemove && (
+                <button
+                  onClick={it.onRemove}
+                  aria-label={`Unlink ${it.label}`}
+                  title="Unlink"
+                  style={{
+                    padding: 2, color: "var(--text-tertiary)",
+                    background: "transparent", border: "none", cursor: "pointer",
+                    borderRadius: "var(--radius-sm)",
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+                >
+                  <X size={10} />
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -1956,6 +2308,7 @@ function ProductExplorerView({
   const [statusFilter, setStatusFilter] = useState<"all" | FeatureStatus>("all");
   const [themeFilter, setThemeFilter] = useState<string>("all");      // theme id or "all"
   const [releaseFilter, setReleaseFilter] = useState<string>("all");  // release id or "all"
+  const [areaFilter, setAreaFilter] = useState<string>("all");        // area id or "all"
 
   const normalizedQuery = query.trim().toLowerCase();
   const queryActive   = normalizedQuery.length > 0;
@@ -1963,7 +2316,8 @@ function ProductExplorerView({
     typeFilter !== "all" ||
     statusFilter !== "all" ||
     themeFilter !== "all" ||
-    releaseFilter !== "all";
+    releaseFilter !== "all" ||
+    areaFilter !== "all";
   const searchActive  = queryActive || filtersActive;
 
   // Resolve the theme/release once so the matcher closures don't pay
@@ -1999,6 +2353,25 @@ function ProductExplorerView({
     if (kind === "feature")    return activeRelease.linkedFeatureIds.includes(id);
     if (kind === "slice")      return activeRelease.linkedSliceIds.includes(id);
     if (kind === "capability") return activeRelease.linkedCapabilityIds.includes(id);
+    return false;
+  };
+  // Area filter — narrows by capability area. For Features the check is
+  // direct; for Slices and Capabilities we hop through the parent
+  // feature. Areas and Feature Sets fall through trivially (they ARE
+  // the structure, not children of it).
+  const matchesArea = (kind: ProductSearchHit["kind"], id: string): boolean => {
+    if (areaFilter === "all") return true;
+    if (kind === "area")    return id === areaFilter;
+    if (kind === "group")   return featureGroups.find(g => g.id === id)?.areaId === areaFilter;
+    if (kind === "feature") return features.find(f => f.id === id)?.areaId === areaFilter;
+    if (kind === "slice") {
+      const s = featureSlices.find(x => x.id === id);
+      return s ? features.find(f => f.id === s.featureId)?.areaId === areaFilter : false;
+    }
+    if (kind === "capability") {
+      const c = productCapabilities.find(x => x.id === id);
+      return c ? features.find(f => f.id === c.featureId)?.areaId === areaFilter : false;
+    }
     return false;
   };
 
@@ -2041,15 +2414,17 @@ function ProductExplorerView({
         if (!matchesStatus(f.status)) return;
         if (!matchesTheme("feature", f.id)) return;
         if (!matchesRelease("feature", f.id)) return;
+        if (!matchesArea("feature", f.id)) return;
         const area = productAreas.find(a => a.id === f.areaId);
         const group = featureGroups.find(g => g.id === f.featureGroupId);
+        // Path breadcrumb for features: "Area / Set" (Set is optional).
         const subtitleParts = [
           area?.title ?? (f.areaId ? "" : "Unassigned features"),
           group?.title,
         ].filter(Boolean);
         all.push({
           kind: "feature", id: f.id, title: f.title,
-          subtitle: subtitleParts.join(" · ") || undefined,
+          subtitle: subtitleParts.join(" / ") || undefined,
           status: f.status,
           unassigned: !f.areaId,
         });
@@ -2063,10 +2438,17 @@ function ProductExplorerView({
         if (!matchesStatus(s.status)) return;
         if (!matchesTheme("slice", s.id)) return;
         if (!matchesRelease("slice", s.id)) return;
+        if (!matchesArea("slice", s.id)) return;
         const parent = features.find(f => f.id === s.featureId);
+        // Full path subtitle: "Area / Set / Feature" so search results
+        // surface where the slice actually lives. Missing levels are
+        // dropped so the breadcrumb stays clean for unassigned features.
+        const parentArea  = parent && productAreas.find(a => a.id === parent.areaId);
+        const parentGroup = parent && featureGroups.find(g => g.id === parent.featureGroupId);
+        const pathParts = [parentArea?.title, parentGroup?.title, parent?.title].filter(Boolean);
         all.push({
           kind: "slice", id: s.id, title: s.title,
-          subtitle: parent?.title,
+          subtitle: pathParts.length > 0 ? pathParts.join(" / ") : parent?.title,
           status: s.status, featureId: s.featureId,
         });
       });
@@ -2078,10 +2460,14 @@ function ProductExplorerView({
         if (!matchesQuery(c.title)) return;
         if (!matchesTheme("capability", c.id)) return;
         if (!matchesRelease("capability", c.id)) return;
+        if (!matchesArea("capability", c.id)) return;
         const parent = features.find(f => f.id === c.featureId);
+        const parentArea  = parent && productAreas.find(a => a.id === parent.areaId);
+        const parentGroup = parent && featureGroups.find(g => g.id === parent.featureGroupId);
+        const pathParts = [parentArea?.title, parentGroup?.title, parent?.title].filter(Boolean);
         all.push({
           kind: "capability", id: c.id, title: c.title,
-          subtitle: parent?.title,
+          subtitle: pathParts.length > 0 ? pathParts.join(" / ") : parent?.title,
           featureId: c.featureId,
         });
       });
@@ -2103,6 +2489,7 @@ function ProductExplorerView({
       if (!matchesStatus(f.status)) return;
       if (!matchesTheme("feature", f.id)) return;
       if (!matchesRelease("feature", f.id)) return;
+      if (!matchesArea("feature", f.id)) return;
       c.feature++;
       if (!f.areaId) c.unassigned++;
     });
@@ -2111,6 +2498,7 @@ function ProductExplorerView({
       if (!matchesStatus(s.status)) return;
       if (!matchesTheme("slice", s.id)) return;
       if (!matchesRelease("slice", s.id)) return;
+      if (!matchesArea("slice", s.id)) return;
       c.slice++;
     });
     if (statusFilter === "all") {
@@ -2118,6 +2506,7 @@ function ProductExplorerView({
         if (!matchesQuery(cap.title)) return;
         if (!matchesTheme("capability", cap.id)) return;
         if (!matchesRelease("capability", cap.id)) return;
+        if (!matchesArea("capability", cap.id)) return;
         c.capability++;
       });
     }
@@ -2153,6 +2542,7 @@ function ProductExplorerView({
     setStatusFilter("all");
     setThemeFilter("all");
     setReleaseFilter("all");
+    setAreaFilter("all");
   };
 
   return (
@@ -2240,9 +2630,11 @@ function ProductExplorerView({
             avoid noise. They sit under a small "Filters" disclosure that
             only opens when the user needs them. */}
         <ProductFilterDropdowns
+          areaFilter={areaFilter}
           statusFilter={statusFilter}
           themeFilter={themeFilter}
           releaseFilter={releaseFilter}
+          onAreaChange={setAreaFilter}
           onStatusChange={setStatusFilter}
           onThemeChange={setThemeFilter}
           onReleaseChange={setReleaseFilter}
@@ -2285,28 +2677,33 @@ function ProductExplorerView({
             <div style={{
               marginTop: 4, fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5,
             }}>
-              Use the + buttons to add groups and features. Click a feature to edit it on the right.
+              Use the + buttons to add feature sets and features. Click a feature to edit it on the right.
             </div>
             <NewAreaButton />
           </>
         )}
       </aside>
 
-      {/* Right detail */}
+      {/* Right pane — focused FeatureDetailPane editor. */}
       <main style={{
-        flex: 1, minWidth: 0, padding: "16px 24px",
-        overflowY: "auto",
+        flex: 1, minWidth: 0,
+        display: "flex", flexDirection: "column",
+        overflow: "hidden",
       }}>
-        {selectedId ? (
-          <FeatureDetailPane featureId={selectedId} />
-        ) : (
-          <div style={{
-            margin: "60px auto", maxWidth: 360, textAlign: "center",
-            fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
-          }}>
-            Select a feature on the left to edit its description, product capabilities, and slices.
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+          <div style={{ padding: "16px 24px" }}>
+            {selectedId ? (
+              <FeatureDetailPane featureId={selectedId} />
+            ) : (
+              <div style={{
+                margin: "60px auto", maxWidth: 360, textAlign: "center",
+                fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+              }}>
+                Select a feature on the left to edit its description, product capabilities, and slices.
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </main>
     </div>
   );
@@ -2318,17 +2715,19 @@ function ProductExplorerView({
 // themselves are minimal native selects so the prototype doesn't have
 // to maintain bespoke popover state for each.
 function ProductFilterDropdowns({
-  statusFilter, themeFilter, releaseFilter,
-  onStatusChange, onThemeChange, onReleaseChange,
+  areaFilter, statusFilter, themeFilter, releaseFilter,
+  onAreaChange, onStatusChange, onThemeChange, onReleaseChange,
 }: {
+  areaFilter: string;        // area id or "all"
   statusFilter: "all" | FeatureStatus;
   themeFilter: string;
   releaseFilter: string;
+  onAreaChange: (id: string) => void;
   onStatusChange: (s: "all" | FeatureStatus) => void;
   onThemeChange: (id: string) => void;
   onReleaseChange: (id: string) => void;
 }) {
-  const { themes, releases } = useStore();
+  const { themes, releases, productAreas } = useStore();
   const selectStyle = (active: boolean): React.CSSProperties => ({
     flex: 1, minWidth: 0,
     padding: "3px 6px",
@@ -2339,7 +2738,21 @@ function ProductFilterDropdowns({
     fontSize: 11, outline: "none",
   });
   return (
-    <div style={{ display: "flex", gap: 4 }}>
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      {/* Area filter — narrows the result set to one capability area's
+          slice / capability / feature children. Useful for scanning a
+          single product surface when the rail is crowded. */}
+      <select
+        value={areaFilter}
+        onChange={e => onAreaChange(e.target.value)}
+        style={selectStyle(areaFilter !== "all")}
+        aria-label="Filter by capability area"
+      >
+        <option value="all">All areas</option>
+        {productAreas.map(a => (
+          <option key={a.id} value={a.id}>{a.title}</option>
+        ))}
+      </select>
       <select
         value={statusFilter}
         onChange={e => onStatusChange(e.target.value as "all" | FeatureStatus)}
@@ -2369,9 +2782,9 @@ function ProductFilterDropdowns({
         value={releaseFilter}
         onChange={e => onReleaseChange(e.target.value)}
         style={selectStyle(releaseFilter !== "all")}
-        aria-label="Filter by release"
+        aria-label="Filter by milestone"
       >
-        <option value="all">All releases</option>
+        <option value="all">All milestones</option>
         {releases.map(r => (
           <option key={r.id} value={r.id}>{r.title}</option>
         ))}
@@ -2483,7 +2896,7 @@ function ProductSearchResultsList({
 function productHitKindLabel(k: ProductSearchHit["kind"]): string {
   switch (k) {
     case "area":       return "Area";
-    case "group":      return "Group";
+    case "group":      return "Feature Set";
     case "feature":    return "Feature";
     case "slice":      return "Slice";
     case "capability": return "Capability";
@@ -2543,10 +2956,16 @@ function ProductTree({
   onSelect: (id: string) => void;
 }) {
   const { productAreas, featureGroups, features } = useStore();
-  // Bucket features: areaId → (groupId | "__none") → Feature[].
   // Features with no areaId land in a synthetic "ungrouped" bucket at
   // the end of the rail so V1's typed-feature flow stays reachable.
   const orphans = features.filter(f => !f.areaId);
+  // Default-collapse capability areas when there are more than two — at
+  // small counts users still want everything expanded, but once the
+  // rail starts to grow we want the structure to be scannable.
+  const defaultCollapsed = productAreas.length > 2;
+  const selectedFeatureAreaId = selectedId
+    ? features.find(f => f.id === selectedId)?.areaId ?? null
+    : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {productAreas.map(area => (
@@ -2557,6 +2976,8 @@ function ProductTree({
           features={features.filter(f => f.areaId === area.id)}
           selectedId={selectedId}
           onSelect={onSelect}
+          // Keep the active area open even if we'd otherwise collapse.
+          initiallyCollapsed={defaultCollapsed && area.id !== selectedFeatureAreaId}
         />
       ))}
       {orphans.length > 0 && (
@@ -2571,16 +2992,17 @@ function ProductTree({
 }
 
 function AreaTreeBlock({
-  area, groups, features, selectedId, onSelect,
+  area, groups, features, selectedId, onSelect, initiallyCollapsed = false,
 }: {
   area: ProductArea;
   groups: FeatureGroup[];
   features: Feature[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  initiallyCollapsed?: boolean;
 }) {
   const { updateProductArea, deleteProductArea, createFeatureGroup, createFeature } = useStore();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(initiallyCollapsed);
   const [editing, setEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState(area.title);
 
@@ -2620,8 +3042,11 @@ function AreaTreeBlock({
             {area.title}
           </button>
         )}
+        <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+          {features.length}
+        </span>
         <button
-          onClick={() => { if (window.confirm(`Delete area "${area.title}"? Its groups and features will be unassigned.`)) deleteProductArea(area.id); }}
+          onClick={() => { if (window.confirm(`Delete area "${area.title}"? Its feature sets and features will be unassigned.`)) deleteProductArea(area.id); }}
           aria-label="Delete area"
           style={{ padding: 2, background: "transparent", border: "none", cursor: "pointer", color: "var(--text-tertiary)" }}
         >
@@ -2646,9 +3071,6 @@ function AreaTreeBlock({
           ))}
           {ungroupedInArea.length > 0 && (
             <div style={{ paddingLeft: 16, marginTop: 2, display: "flex", flexDirection: "column", gap: 2 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-                In area
-              </div>
               {ungroupedInArea.map(f => (
                 <FeatureTreeRow key={f.id} feature={f} selectedId={selectedId} onSelect={onSelect} />
               ))}
@@ -2657,16 +3079,16 @@ function AreaTreeBlock({
           <div style={{ display: "flex", gap: 6, paddingLeft: 16, marginTop: 4 }}>
             <button
               onClick={() => {
-                const title = window.prompt("New feature group name");
+                const title = window.prompt("New feature set name");
                 if (title?.trim()) createFeatureGroup({ title, areaId: area.id });
               }}
               style={dashedBtn()}
             >
-              + Add group
+              + Add feature set
             </button>
             <button
               onClick={() => {
-                const title = window.prompt("New feature name (no group)");
+                const title = window.prompt("New feature name (no set)");
                 if (title?.trim()) createFeature({ title, areaId: area.id });
               }}
               style={dashedBtn()}
@@ -2724,8 +3146,8 @@ function GroupTreeBlock({
           </button>
         )}
         <button
-          onClick={() => { if (window.confirm(`Delete group "${group.title}"? Its features will be detached but kept.`)) deleteFeatureGroup(group.id); }}
-          aria-label="Delete group"
+          onClick={() => { if (window.confirm(`Delete feature set "${group.title}"? Its features will be detached but kept.`)) deleteFeatureGroup(group.id); }}
+          aria-label="Delete feature set"
           style={{ padding: 2, background: "transparent", border: "none", cursor: "pointer", color: "var(--text-tertiary)" }}
         >
           <X size={9} />
@@ -2769,7 +3191,7 @@ function UnassignedTreeBlock({
       background: "var(--bg-sunken)", padding: "6px 8px",
     }}>
       <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-        Unassigned features · {features.length}
+        Unassigned · {features.length}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {features.map(f => (
@@ -2777,7 +3199,7 @@ function UnassignedTreeBlock({
         ))}
       </div>
       <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", marginTop: 6, lineHeight: 1.45 }}>
-        Features typed on weekly goals land here. Use <strong style={{ color: "var(--text-secondary)" }}>Assign</strong> to file them under a capability area and feature group — their linked goals and intents are preserved.
+        Features typed on weekly goals land here. Use <strong style={{ color: "var(--text-secondary)" }}>Assign</strong> to file them under a capability area and feature set — their linked goals and intents are preserved.
       </div>
     </div>
   );
@@ -2842,7 +3264,7 @@ function UnassignedFeatureRow({
       </button>
       <button
         onClick={() => setShowAssign(true)}
-        title="Assign this feature to a capability area + feature group"
+        title="Assign this feature to a capability area + feature set"
         style={{
           flexShrink: 0,
           padding: "2px 8px",
@@ -2974,7 +3396,7 @@ function AssignFeatureDialog({
             {feature.title}
           </div>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4, lineHeight: 1.45 }}>
-            Pick a capability area and (optionally) a feature group. Linked weekly goals and intents stay attached to the feature.
+            Pick a capability area and (optionally) a feature set. Linked weekly goals and intents stay attached to the feature.
           </div>
         </div>
 
@@ -3033,10 +3455,10 @@ function AssignFeatureDialog({
           </div>
         </section>
 
-        {/* Feature group selector */}
+        {/* Feature set selector */}
         <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-            Feature group
+            Feature set
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <label style={radioRow(groupMode === "none")}>
@@ -3046,7 +3468,7 @@ function AssignFeatureDialog({
                 onChange={() => setGroupMode("none")}
               />
               <span style={{ fontSize: "var(--fs-body)", color: "var(--text)" }}>
-                Place directly in area (no group)
+                Place directly in area (no feature set)
               </span>
             </label>
             <label style={{
@@ -3060,7 +3482,7 @@ function AssignFeatureDialog({
                 disabled={areaMode === "new" || groupsInChosenArea.length === 0}
               />
               <span style={{ fontSize: "var(--fs-body)", color: "var(--text)" }}>
-                Use an existing group
+                Use an existing feature set
               </span>
               {areaMode === "existing" && groupsInChosenArea.length === 0 && (
                 <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>· none in this area yet</span>
@@ -3084,14 +3506,14 @@ function AssignFeatureDialog({
                 onChange={() => setGroupMode("new")}
               />
               <span style={{ fontSize: "var(--fs-body)", color: "var(--text)" }}>
-                Create a new group
+                Create a new feature set
               </span>
             </label>
             {groupMode === "new" && (
               <input
                 value={newGroupTitle}
                 onChange={e => setNewGroupTitle(e.target.value)}
-                placeholder="New feature group name…"
+                placeholder="New feature set name…"
                 style={inputStyle()}
               />
             )}
@@ -3212,10 +3634,12 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
     features, productCapabilities, featureSlices,
     productAreas, featureGroups,
     weeklyGoals, wipItems, themes,
+    releases,
     updateFeature, deleteFeature,
     createProductCapability, updateProductCapability, deleteProductCapability,
     createFeatureSlice, toggleThemeFeature,
     setRoute, openWip,
+    setRoadmapFocus,
   } = useStore();
 
   const feature = features.find(f => f.id === featureId);
@@ -3243,13 +3667,31 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
   const themeIdsForFeature = themes
     .filter(t => t.linkedFeatureIds.includes(feature.id))
     .map(t => t.id);
+  // Milestones that reference this feature directly OR via one of its
+  // slices / capabilities / its parent feature set. Surfaces the
+  // milestone planning picture from the Product View, so a reviewer
+  // can answer "where is this feature being shipped?" without leaving
+  // the screen.
+  const sliceIds = slices.map(s => s.id);
+  const capIds = caps.map(c => c.id);
+  const linkedReleases = releases.filter(r =>
+    r.linkedFeatureIds.includes(feature.id) ||
+    (feature.featureGroupId && r.linkedFeatureGroupIds.includes(feature.featureGroupId)) ||
+    sliceIds.some(id => r.linkedSliceIds.includes(id)) ||
+    capIds.some(id => r.linkedCapabilityIds.includes(id))
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {/* Breadcrumb */}
+      {/* Breadcrumb — "Area / Set / <this feature title>" so the user
+          knows where they are even when they landed from search or the
+          Browse view. The feature title repeats below, but the path
+          tells the user where it lives. */}
       <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
         {area?.title ?? "Unassigned features"}
-        {group && <> · {group.title}</>}
+        {group && <> {" / "} {group.title}</>}
+        {" / "}
+        <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{feature.title}</span>
       </div>
 
       {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
@@ -3278,7 +3720,7 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
               This feature isn't filed yet.
             </div>
             <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.45, marginTop: 2 }}>
-              Assign it to a capability area and (optionally) a feature group. Linked goals and intents stay attached.
+              Assign it to a capability area and (optionally) a feature set. Linked goals and intents stay attached.
             </div>
           </div>
           <button
@@ -3341,9 +3783,7 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
 
       {/* Description */}
       <section>
-        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-          Description
-        </div>
+        <div style={reviewLabelStyle()}>Description</div>
         <textarea
           value={descDraft}
           onChange={e => setDescDraft(e.target.value)}
@@ -3351,6 +3791,7 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
           rows={2}
           placeholder="What this feature does, in one or two lines."
           style={{
+            marginTop: 4,
             width: "100%", boxSizing: "border-box",
             padding: "6px 9px",
             border: "1px solid var(--border)", borderRadius: "var(--radius)",
@@ -3363,12 +3804,40 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
         />
       </section>
 
+      {/* Linked milestones — read-only reference (linking happens in
+          the Milestones tab, not here). */}
+      {linkedReleases.length > 0 && (
+        <section>
+          <div style={reviewLabelStyle()}>
+            Linked milestones · {linkedReleases.length}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+            {linkedReleases.map(r => (
+              <button
+                key={r.id}
+                onClick={() => setRoadmapFocus({ tab: "releases" })}
+                title={`Open milestone · ${r.title}`}
+                style={{
+                  padding: "3px 9px", borderRadius: 100,
+                  background: "var(--bg-sunken)", border: "1px solid var(--border)",
+                  color: "var(--text-secondary)", fontSize: 11, lineHeight: 1.4,
+                  cursor: "pointer", textAlign: "left",
+                }}
+              >
+                {r.title}
+                <span style={{ color: "var(--text-tertiary)", marginLeft: 6 }}>{r.versionLabel}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* Product capabilities — owned by the feature, NOT the slice. */}
       <section>
-        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 6 }}>
-          Product capabilities · {caps.length}
+        <div style={reviewLabelStyle()}>
+          Capabilities · {caps.length}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
           {caps.map(cap => (
             <CapabilityRow
               key={cap.id}
@@ -3383,11 +3852,9 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
 
       {/* Feature slices */}
       <section>
-        <div style={{
-          display: "flex", alignItems: "center", gap: 6, marginBottom: 6,
-        }}>
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-            Feature slices · {slices.length}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={reviewLabelStyle()}>
+            Slices · {slices.length}
           </span>
           <span style={{ flex: 1 }} />
           <button
@@ -3401,11 +3868,11 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
           </button>
         </div>
         {slices.length === 0 ? (
-          <div style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
+          <div style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.5, marginTop: 6 }}>
             No slices yet. A slice is a deliverable version of this feature — it picks which capabilities to include, defer, or exclude.
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 6 }}>
             {slices.map(slice => (
               <SliceCard key={slice.id} slice={slice} capabilities={caps} />
             ))}
@@ -3416,10 +3883,10 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
       {/* Linked goals + intents (read-only on Product View) */}
       {(linkedGoals.length > 0 || linkedIntents.length > 0) && (
         <section>
-          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 6 }}>
-            Linked
+          <div style={reviewLabelStyle()}>
+            Linked weekly goals &amp; intents · {linkedGoals.length + linkedIntents.length}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
             {linkedGoals.map(g => (
               <div key={g.id} style={{
                 display: "flex", alignItems: "center", gap: 6,
@@ -3562,12 +4029,15 @@ function sliceStatusPill(s: SliceCapabilityStatus | null): React.CSSProperties {
 }
 
 function SliceCard({
-  slice, capabilities,
+  slice,
 }: {
   slice: FeatureSlice;
-  capabilities: ProductCapability[];
+  // The `capabilities` prop used to drive the per-slice MoSCoW
+  // inclusion table; that table moved to Milestones, so the prop is
+  // no longer needed.
+  capabilities?: ProductCapability[];
 }) {
-  const { updateFeatureSlice, deleteFeatureSlice, setSliceCapabilityStatus, releases, themes, toggleThemeSlice } = useStore();
+  const { updateFeatureSlice, deleteFeatureSlice, releases, themes, toggleThemeSlice } = useStore();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(slice.title);
   const [descDraft, setDescDraft] = useState(slice.description ?? "");
@@ -3639,44 +4109,14 @@ function SliceCard({
         onBlurCapture={e => (e.target.style.borderColor = "var(--border)")}
       />
 
-      {/* Inclusion table — one row per parent-feature capability. */}
-      <div>
-        <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-          Includes
-        </div>
-        {capabilities.length === 0 ? (
-          <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.45 }}>
-            Add capabilities to the parent feature first — then this slice can pick which to include, defer, or exclude.
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            {capabilities.map(cap => {
-              const current: SliceCapabilityStatus | null = slice.capabilityStatus?.[cap.id] ?? null;
-              return (
-                <div key={cap.id} style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "4px 6px",
-                  borderRadius: "var(--radius)",
-                  background: current === null ? "transparent" : "var(--bg-sunken)",
-                }}>
-                  <span style={{
-                    flex: 1, fontSize: 12, color: current === null ? "var(--text-tertiary)" : "var(--text)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {cap.title}
-                  </span>
-                  <SliceCapabilityPicker
-                    current={current}
-                    onSet={(s) => setSliceCapabilityStatus(slice.id, cap.id, s)}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      {/* Capability inclusion table removed in this revision. MoSCoW
+          lives only on Milestones now — Feature Slice's role here is to
+          describe product scope/version, not milestone priority. The
+          parent-feature capability list is browsable via the feature's
+          own detail pane; per-milestone priority lives on the Milestones
+          tab. */}
 
-      {/* Read-only cross-reference: releases that include this slice. */}
+      {/* Read-only cross-reference: milestones that include this slice. */}
       {releaseIdsForSlice.length > 0 && (
         <ReleaseRefList releaseIds={releaseIdsForSlice} />
       )}
@@ -3801,32 +4241,74 @@ function releasePillStyle(status: ReleaseStatus): React.CSSProperties {
 
 function ReleasesView() {
   const { releases, createRelease } = useStore();
-  // Sort: in-progress first, then planned, then released, alphabetical
-  // inside each bucket. Keeps active scope at the top.
-  const sorted = useMemo(() => {
+  // Group milestones by versionFamilyId so the compact strip shows one
+  // card per FAMILY (i.e. one card per "M1", not three cards for
+  // v1/v2/v3 that look like three separate milestones). Inside each
+  // card we render the version-pill row so the user sees lineage at a
+  // glance. The "current" version (newest createdAt in the family)
+  // drives the card-level title / status / date / counts; clicking a
+  // non-current pill switches the detail pane to that snapshot.
+  const families = useMemo(() => {
+    type Family = { familyId: string; versions: Release[] };
+    const map = new Map<string, Release[]>();
+    for (const r of releases) {
+      const arr = map.get(r.versionFamilyId) ?? [];
+      arr.push(r);
+      map.set(r.versionFamilyId, arr);
+    }
     const order: Record<ReleaseStatus, number> = { in_progress: 0, planned: 1, released: 2 };
-    return releases.slice().sort((a, b) => {
-      const d = order[a.status] - order[b.status];
-      if (d !== 0) return d;
-      return a.title.localeCompare(b.title);
+    const out: Family[] = [];
+    map.forEach((versions, familyId) => {
+      versions.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      out.push({ familyId, versions });
     });
+    out.sort((a, b) => {
+      const ca = a.versions[a.versions.length - 1];
+      const cb = b.versions[b.versions.length - 1];
+      const d = order[ca.status] - order[cb.status];
+      if (d !== 0) return d;
+      return ca.title.localeCompare(cb.title);
+    });
+    return out;
   }, [releases]);
+  const sorted = useMemo(
+    () => families.flatMap(f => f.versions),
+    [families],
+  );
+
+  // Selected milestone — drives the expanded detail panel below the
+  // scan row. Defaults to the first sorted milestone so the page lands
+  // populated; falls back gracefully if all milestones are deleted.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  React.useEffect(() => {
+    if (sorted.length === 0) { setSelectedId(null); return; }
+    if (selectedId && sorted.some(r => r.id === selectedId)) return;
+    setSelectedId(sorted[0].id);
+  }, [sorted, selectedId]);
+
+  const selectedRelease = selectedId
+    ? releases.find(r => r.id === selectedId) ?? null
+    : null;
+
+  const handleCreate = () => {
+    const newId = createRelease({ title: "Untitled milestone" });
+    setSelectedId(newId);
+  };
 
   return (
     <div style={{
       display: "flex", flexDirection: "column", gap: 12,
-      padding: 16, minHeight: "100%",
-      maxWidth: 920, margin: "0 auto",
+      padding: "16px 16px 24px", minHeight: "100%",
+      maxWidth: 1280, margin: "0 auto",
     }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: 8,
-      }}>
+      {/* Header strip — explainer + new-milestone button */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
-          Releases package the goals, features, slices, and capabilities you plan to ship together. They never own anything — the same target can sit in multiple releases.
+          Milestones define what needs to be ready for a business target — for example, <em>July 1st Launch</em> or <em>Internal Admin V1</em>. They never own anything; the same goal, feature, slice, or capability can sit in multiple milestones.
         </span>
         <span style={{ flex: 1 }} />
         <button
-          onClick={() => createRelease({ title: "Untitled release" })}
+          onClick={handleCreate}
           style={{
             padding: "5px 12px",
             background: "var(--accent)",
@@ -3836,7 +4318,7 @@ function ReleasesView() {
             cursor: "pointer", whiteSpace: "nowrap",
           }}
         >
-          + New release
+          + New milestone
         </button>
       </div>
 
@@ -3845,23 +4327,345 @@ function ReleasesView() {
           margin: "60px auto", maxWidth: 380, textAlign: "center",
           fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
         }}>
-          No releases yet. Use <strong style={{ color: "var(--text)" }}>+ New release</strong> to package a set of goals / features / slices / capabilities you plan to ship together.
+          No milestones yet. Use <strong style={{ color: "var(--text)" }}>+ New milestone</strong> to define what needs to be ready for a business target.
         </div>
       ) : (
-        sorted.map(r => <ReleaseCard key={r.id} release={r} />)
+        <>
+          {/* Horizontal scan row — compact summary cards, scrollable
+              horizontally when the milestones outgrow the page width.
+              Selected card gets an accent border + bg. The last card is
+              a dashed "+ New milestone" affordance so the user never
+              loses the create entry-point. */}
+          <div style={{
+            display: "flex", gap: 12, alignItems: "stretch",
+            overflowX: "auto", overflowY: "hidden",
+            padding: "4px 4px 12px",
+            // Tiny scrollbar styling via WebKit; native fallback elsewhere.
+            scrollbarWidth: "thin" as const,
+          }}>
+            {families.map(family => {
+              // The "card" represents the family. Its visible body
+              // shows the CURRENT version (last in chronological
+              // order); a version-pill row below the title lets the
+              // user pick any historical snapshot. If a non-current
+              // version is selected, the card border shifts to accent
+              // (instead of green) so it's obvious the strip is
+              // showing a snapshot, not the latest.
+              const current = family.versions[family.versions.length - 1];
+              const selectedVersionId =
+                selectedId && family.versions.some(v => v.id === selectedId)
+                  ? selectedId
+                  : current.id;
+              const display = family.versions.find(v => v.id === selectedVersionId) ?? current;
+              return (
+                <CompactMilestoneCard
+                  key={family.familyId}
+                  release={display}
+                  familyVersions={family.versions}
+                  selectedVersionId={selectedVersionId}
+                  isAnyVersionSelected={family.versions.some(v => v.id === selectedId)}
+                  onSelectVersion={(id) => setSelectedId(id)}
+                />
+              );
+            })}
+            {/* + New milestone as last card — keeps the affordance in
+                the scan row in addition to the header button. */}
+            <button
+              onClick={handleCreate}
+              style={{
+                flexShrink: 0,
+                width: 220,
+                padding: "16px 14px",
+                borderRadius: "var(--radius-lg)",
+                border: "1px dashed var(--border-strong)",
+                background: "transparent",
+                color: "var(--text-tertiary)",
+                fontSize: "var(--fs-meta)", fontWeight: 500,
+                cursor: "pointer", textAlign: "center",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+              title="Create a new milestone"
+            >
+              + New milestone
+            </button>
+          </div>
+
+          {/* Expanded detail of the selected milestone — full-width
+              workspace card. Same ReleaseCard component used previously,
+              now rendered ONLY for the selected milestone. */}
+          {selectedRelease ? (
+            <ReleaseCard
+              key={selectedRelease.id}
+              release={selectedRelease}
+              onSelectVersion={setSelectedId}
+            />
+          ) : (
+            <div style={{
+              margin: "40px auto", maxWidth: 360, textAlign: "center",
+              fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+            }}>
+              Pick a milestone above to see its product scope and related goals.
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function ReleaseCard({ release }: { release: Release }) {
+// ── CompactMilestoneCard ───────────────────────────────────────────────
+// One column in the horizontal milestone scan row. Fixed width (~220px)
+// so multiple cards sit side-by-side cleanly; the parent container is
+// horizontally scrollable when the row outgrows the viewport. Click to
+// select; the detail panel below expands to the picked milestone.
+//
+// Each compact card shows:
+//   • status pill (clickable here would be confusing — we keep status
+//     editing in the expanded detail card to avoid two action paths)
+//   • title (read-only here; editing lives in the expanded card)
+//   • target date / range
+//   • description excerpt (1–2 lines, clamped)
+//   • signal-of-progress chip row: linked goals count + MoSCoW counts
+function CompactMilestoneCard({
+  release, familyVersions, selectedVersionId, isAnyVersionSelected, onSelectVersion,
+}: {
+  release: Release;
+  // Every version in this milestone's family, sorted oldest → newest.
+  // Length >= 1 (the family always contains at least this card).
+  familyVersions: Release[];
+  // Which version (by id) the detail pane is currently showing — used
+  // to highlight the pill in the version-list row.
+  selectedVersionId: string;
+  // True when any version in the family is the selected one in the
+  // detail pane. Drives the card border highlight.
+  isAnyVersionSelected: boolean;
+  // Switch the detail pane to the given version id.
+  onSelectVersion: (id: string) => void;
+}) {
+  const { weeklyGoals } = useStore();
+  const goalCount = weeklyGoals.filter(g => release.linkedGoalIds.includes(g.id)).length;
+  // The latest version in the family is the "current" version.
+  const current = familyVersions[familyVersions.length - 1];
+  const isShowingCurrent = release.id === current.id;
+  // Count items by MoSCoW priority — uses the same composite-key lookup
+  // as the expanded card so the two surfaces never disagree.
+  const counts: Record<MoscowPriority, number> = { must: 0, should: 0, could: 0, wont: 0 };
+  const collectIds: string[] = [
+    ...release.linkedAreaIds.map(id => milestoneLinkKey("area", id)),
+    ...release.linkedFeatureGroupIds.map(id => milestoneLinkKey("group", id)),
+    ...release.linkedFeatureIds.map(id => milestoneLinkKey("feature", id)),
+    ...release.linkedSliceIds.map(id => milestoneLinkKey("slice", id)),
+    ...release.linkedCapabilityIds.map(id => milestoneLinkKey("capability", id)),
+  ];
+  collectIds.forEach(k => {
+    const entry = release.productPriorities[k];
+    const priority: MoscowPriority = entry?.priority ?? "must";
+    counts[priority] += 1;
+  });
+  const totalScope = collectIds.length;
+  const dateLabel = formatReleaseTargetLabel(release.targetStart, release.targetEnd);
+
+  const stripeColor =
+    release.status === "released"   ? "var(--status-accepted)" :
+    release.status === "in_progress" ? "#f59e0b" :
+                                       "var(--accent)";
+
+  const selected = isAnyVersionSelected;
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        width: 240,
+        display: "flex", flexDirection: "column", gap: 8,
+        padding: "10px 12px 12px",
+        borderRadius: "var(--radius-lg)",
+        background: selected ? "var(--accent-soft)" : "var(--bg)",
+        borderTop:    selected ? "1px solid var(--accent)" : "1px solid var(--border)",
+        borderRight:  selected ? "1px solid var(--accent)" : "1px solid var(--border)",
+        borderBottom: selected ? "1px solid var(--accent)" : "1px solid var(--border)",
+        borderLeft: `4px solid ${stripeColor}`,
+        textAlign: "left",
+        boxShadow: selected ? "0 0 0 3px rgba(56, 132, 255, 0.18)" : undefined,
+        transition: "box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={releasePillStyle(current.status)}>
+          {RELEASE_STATUS_LABEL[current.status]}
+        </span>
+        <span style={{ flex: 1 }} />
+        {dateLabel && (
+          <span style={{
+            fontSize: 10, color: "var(--text-tertiary)",
+            whiteSpace: "nowrap",
+          }}>
+            {dateLabel}
+          </span>
+        )}
+      </div>
+      {/* Milestone family name — taken from the CURRENT version (the
+          authoritative definition). Clicking the title selects the
+          current version so the detail pane jumps to "the one being
+          shipped". */}
+      <button
+        onClick={() => onSelectVersion(current.id)}
+        style={{
+          background: "transparent", border: "none", padding: 0,
+          fontSize: 14, fontWeight: 600,
+          color: (selected && isShowingCurrent) ? "var(--accent)" : "var(--text)",
+          lineHeight: 1.3, textAlign: "left", cursor: "pointer",
+          overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box",
+          WebkitLineClamp: 2 as unknown as number, WebkitBoxOrient: "vertical" as const,
+        }}
+        title={`Open ${current.title} (current version)`}
+      >
+        {current.title}
+      </button>
+      {/* Version-pill row — every version in the family stacked horizontally.
+          The CURRENT version is green-pilled (its definition is the
+          authoritative one); older versions are subtler. Clicking a
+          pill switches the detail pane to that version's snapshot. */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {familyVersions.map(v => {
+          const isCurrent = v.id === current.id;
+          const isActive = v.id === selectedVersionId;
+          return (
+            <button
+              key={v.id}
+              onClick={() => onSelectVersion(v.id)}
+              title={v.versionSummary
+                ? `${v.versionLabel} — ${v.versionSummary}${isCurrent ? " · current" : " · snapshot"}`
+                : `${v.versionLabel}${isCurrent ? " · current" : " · snapshot"}`}
+              style={{
+                padding: "1px 8px", borderRadius: 100,
+                border: isActive
+                  ? `1px solid ${isCurrent ? "#15803d" : "var(--accent)"}`
+                  : "1px solid var(--border)",
+                background: isActive
+                  ? (isCurrent ? "rgba(34,197,94,0.10)" : "var(--accent-soft)")
+                  : (isCurrent ? "rgba(34,197,94,0.04)" : "var(--bg-sunken)"),
+                color: isCurrent ? "#15803d" : "var(--text-secondary)",
+                fontSize: 10, fontWeight: 600, lineHeight: 1.4,
+                cursor: "pointer", whiteSpace: "nowrap",
+              }}
+            >
+              {v.versionLabel}{isCurrent ? " · current" : ""}
+            </button>
+          );
+        })}
+      </div>
+      {release.description && (
+        <div style={{
+          fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.45,
+          overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box",
+          WebkitLineClamp: 2 as unknown as number, WebkitBoxOrient: "vertical" as const,
+        }}>
+          {release.description}
+        </div>
+      )}
+      {/* Stats row — goals + total scope. MoSCoW breakdown below it. */}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: "auto" }}>
+        <span style={compactStatPill()}>
+          {goalCount} goal{goalCount === 1 ? "" : "s"}
+        </span>
+        <span style={compactStatPill()}>
+          {totalScope} scope item{totalScope === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+        {(["must", "should", "could", "wont"] as MoscowPriority[]).map(p => {
+          const n = counts[p];
+          if (n === 0) return null;
+          return (
+            <span key={p} style={compactMoscowCountPill(p)}>
+              {p === "must" ? "Must" : p === "should" ? "Should" : p === "could" ? "Could" : "Won't"} · {n}
+            </span>
+          );
+        })}
+        {totalScope === 0 && (
+          <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+            No scope yet
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function compactStatPill(): React.CSSProperties {
+  return {
+    fontSize: 10, fontWeight: 500,
+    color: "var(--text-secondary)",
+    background: "var(--bg-sunken)",
+    border: "1px solid var(--border)",
+    borderRadius: 100, padding: "1px 7px",
+    whiteSpace: "nowrap",
+  };
+}
+
+function compactMoscowCountPill(priority: MoscowPriority): React.CSSProperties {
+  const palette: Record<MoscowPriority, { bg: string; fg: string; bd: string }> = {
+    must:   { bg: "rgba(34,197,94,0.10)",  fg: "#15803d", bd: "rgba(34,197,94,0.40)" },
+    should: { bg: "rgba(59,130,246,0.10)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.40)" },
+    could:  { bg: "rgba(245,158,11,0.10)", fg: "#b45309", bd: "rgba(245,158,11,0.40)" },
+    wont:   { bg: "var(--bg-sunken)",      fg: "var(--text-secondary)", bd: "var(--border)" },
+  };
+  const p = palette[priority];
+  return {
+    fontSize: 9.5, fontWeight: 600, letterSpacing: 0.2,
+    color: p.fg, background: p.bg,
+    border: `1px solid ${p.bd}`,
+    borderRadius: 100, padding: "1px 7px",
+    whiteSpace: "nowrap",
+  };
+}
+
+function ReleaseCard({
+  release, onSelectVersion,
+}: {
+  release: Release;
+  // Lets the parent strip switch to a sibling version when the user
+  // picks one from this card's version dropdown. Undefined when no
+  // parent owns the selection (i.e. embedded surfaces).
+  onSelectVersion?: (id: string) => void;
+}) {
   const {
     updateRelease, deleteRelease,
-    weeklyGoals, features, featureSlices, productCapabilities,
+    releases,
+    cloneRelease, recordMilestoneAudit,
+    weeklyGoals, features, featureSlices, productCapabilities, productAreas, featureGroups,
     themes, toggleThemeRelease,
     toggleReleaseGoal, toggleReleaseFeature, toggleReleaseSlice, toggleReleaseCapability,
+    toggleReleaseArea, toggleReleaseFeatureGroup,
+    setMilestoneObjectPriority, setMilestoneObjectNote,
     setRoadmapFocus,
   } = useStore();
+  // Review = compact, content-first read of the milestone. Default —
+  // matches the same pattern used on Weekly Goal cards (less busy by
+  // default; click Configure to edit). Per-card state, so each
+  // milestone can be in its own mode independent of the others.
+  const [rawMode, setMode] = useState<"review" | "configure">("review");
+  // Family members for the version dropdown — all releases sharing this
+  // milestone's versionFamilyId, sorted by createdAt so older versions
+  // sit at the top. Includes this release itself.
+  const familyVersions = useMemo(
+    () => releases
+      .filter(r => r.versionFamilyId === release.versionFamilyId)
+      .slice()
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [releases, release.versionFamilyId],
+  );
+  const isLatestInFamily =
+    familyVersions.length === 0
+      ? true
+      : familyVersions[familyVersions.length - 1].id === release.id;
+  // Lock older versions to Review — they're historical snapshots and
+  // shouldn't be edited directly (the spec calls this out explicitly).
+  // If the user wants to evolve an old version, they clone it into a
+  // new version via the "Create new version from this" affordance.
+  const mode = isLatestInFamily ? rawMode : "review";
   const themeIdsForRelease = themes
     .filter(t => t.linkedReleaseIds.includes(release.id))
     .map(t => t.id);
@@ -3882,9 +4686,143 @@ function ReleaseCard({ release }: { release: Release }) {
   }, [release.id, release.title, release.description, release.targetStart, release.targetEnd]);
 
   const linkedGoals = weeklyGoals.filter(g => release.linkedGoalIds.includes(g.id));
-  const linkedFeatures = features.filter(f => release.linkedFeatureIds.includes(f.id));
-  const linkedSlices = featureSlices.filter(s => release.linkedSliceIds.includes(s.id));
-  const linkedCapabilities = productCapabilities.filter(c => release.linkedCapabilityIds.includes(c.id));
+
+  // Flatten every linked product object into one homogenous list with
+  // its MoSCoW priority + optional note so we can bucket by priority
+  // for the four grouped sections. The same row shape is used for all
+  // five object kinds — kind chip + title + parent hint + priority.
+  const productLinks: MilestoneRow[] = [];
+  // Helper — read the priority entry; fall back to "must" if the link
+  // exists but the priority map somehow doesn't have an entry (e.g.
+  // ancient seed data). New links always insert an entry via the
+  // toggle action, so this is just defence.
+  const priorityOf = (kind: MilestoneObjectKind, objectId: string): { priority: MoscowPriority; note?: string } =>
+    release.productPriorities[milestoneLinkKey(kind, objectId)] ?? { priority: "must" };
+
+  // Areas
+  productAreas
+    .filter(a => release.linkedAreaIds.includes(a.id))
+    .forEach(a => {
+      const p = priorityOf("area", a.id);
+      productLinks.push({
+        kind: "area", objectId: a.id, title: a.title,
+        priority: p.priority, note: p.note,
+        onUnlink: () => {
+          toggleReleaseArea(release.id, a.id);
+          recordMilestoneAudit(
+            release.id,
+            `Removed Capability Area · ${a.title}`,
+            { kind: "scope_removed", objectLabel: `Capability Area · ${a.title}` },
+          );
+        },
+        // Areas open at their first feature in the Product View tree.
+        onOpen: () => {
+          const first = features.find(f => f.areaId === a.id);
+          if (first) setRoadmapFocus({ tab: "product", featureId: first.id });
+        },
+        linkedGoals: weeklyGoals.filter(g =>
+          g.linkedFeatureIds.some(fid => features.find(f => f.id === fid)?.areaId === a.id)
+        ),
+      });
+    });
+  // Feature Groups
+  featureGroups
+    .filter(g => release.linkedFeatureGroupIds.includes(g.id))
+    .forEach(g => {
+      const p = priorityOf("group", g.id);
+      const parent = productAreas.find(a => a.id === g.areaId);
+      productLinks.push({
+        kind: "group", objectId: g.id, title: g.title,
+        parentTitle: parent?.title,
+        priority: p.priority, note: p.note,
+        onUnlink: () => {
+          toggleReleaseFeatureGroup(release.id, g.id);
+          recordMilestoneAudit(
+            release.id,
+            `Removed Feature Set · ${g.title}`,
+            { kind: "scope_removed", objectLabel: `Feature Set · ${g.title}` },
+          );
+        },
+        onOpen: () => {
+          const first = features.find(f => f.featureGroupId === g.id);
+          if (first) setRoadmapFocus({ tab: "product", featureId: first.id });
+        },
+        linkedGoals: weeklyGoals.filter(goal =>
+          goal.linkedFeatureIds.some(fid => features.find(f => f.id === fid)?.featureGroupId === g.id)
+        ),
+      });
+    });
+  // Features
+  features
+    .filter(f => release.linkedFeatureIds.includes(f.id))
+    .forEach(f => {
+      const p = priorityOf("feature", f.id);
+      productLinks.push({
+        kind: "feature", objectId: f.id, title: f.title,
+        priority: p.priority, note: p.note,
+        onUnlink: () => {
+          toggleReleaseFeature(release.id, f.id);
+          recordMilestoneAudit(
+            release.id,
+            `Removed Feature · ${f.title}`,
+            { kind: "scope_removed", objectLabel: `Feature · ${f.title}` },
+          );
+        },
+        onOpen: () => setRoadmapFocus({ tab: "product", featureId: f.id }),
+        linkedGoals: weeklyGoals.filter(g => g.linkedFeatureIds.includes(f.id)),
+      });
+    });
+  // Slices
+  featureSlices
+    .filter(s => release.linkedSliceIds.includes(s.id))
+    .forEach(s => {
+      const p = priorityOf("slice", s.id);
+      const parent = features.find(f => f.id === s.featureId);
+      productLinks.push({
+        kind: "slice", objectId: s.id, title: s.title,
+        parentTitle: parent?.title,
+        priority: p.priority, note: p.note,
+        onUnlink: () => {
+          toggleReleaseSlice(release.id, s.id);
+          recordMilestoneAudit(
+            release.id,
+            `Removed Feature Slice · ${s.title}`,
+            { kind: "scope_removed", objectLabel: `Feature Slice · ${s.title}` },
+          );
+        },
+        onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
+        linkedGoals: weeklyGoals.filter(g => g.linkedSliceIds.includes(s.id)),
+      });
+    });
+  // Capabilities
+  productCapabilities
+    .filter(c => release.linkedCapabilityIds.includes(c.id))
+    .forEach(c => {
+      const p = priorityOf("capability", c.id);
+      const parent = features.find(f => f.id === c.featureId);
+      productLinks.push({
+        kind: "capability", objectId: c.id, title: c.title,
+        parentTitle: parent?.title,
+        priority: p.priority, note: p.note,
+        onUnlink: () => {
+          toggleReleaseCapability(release.id, c.id);
+          recordMilestoneAudit(
+            release.id,
+            `Removed Capability · ${c.title}`,
+            { kind: "scope_removed", objectLabel: `Capability · ${c.title}` },
+          );
+        },
+        onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
+        linkedGoals: weeklyGoals.filter(g => g.linkedCapabilityIds.includes(c.id)),
+      });
+    });
+
+  const byPriority: Record<MoscowPriority, MilestoneRow[]> = {
+    must:   productLinks.filter(p => p.priority === "must"),
+    should: productLinks.filter(p => p.priority === "should"),
+    could:  productLinks.filter(p => p.priority === "could"),
+    wont:   productLinks.filter(p => p.priority === "wont"),
+  };
 
   const dateLabel = formatReleaseTargetLabel(release.targetStart, release.targetEnd);
 
@@ -3896,242 +4834,529 @@ function ReleaseCard({ release }: { release: Release }) {
         borderTop:    "1px solid var(--border)",
         borderRight:  "1px solid var(--border)",
         borderBottom: "1px solid var(--border)",
-        borderLeft: `3px solid ${release.status === "released" ? "var(--status-accepted)" : release.status === "in_progress" ? "#f59e0b" : "var(--accent)"}`,
+        borderLeft: `4px solid ${release.status === "released" ? "var(--status-accepted)" : release.status === "in_progress" ? "#f59e0b" : "var(--accent)"}`,
         borderRadius: "var(--radius-lg)",
-        padding: "14px 16px",
-        display: "flex", flexDirection: "column", gap: 12,
+        padding: "16px 20px 18px",
+        display: "flex", flexDirection: "column", gap: 14,
       }}
     >
-      {/* Title + status + delete */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        {editingTitle ? (
-          <input
-            autoFocus
-            value={titleDraft}
-            onChange={e => setTitleDraft(e.target.value)}
-            onBlur={() => { updateRelease(release.id, { title: titleDraft.trim() || release.title }); setEditingTitle(false); }}
-            onKeyDown={e => {
-              if (e.key === "Enter") { updateRelease(release.id, { title: titleDraft.trim() || release.title }); setEditingTitle(false); }
-              else if (e.key === "Escape") { setTitleDraft(release.title); setEditingTitle(false); }
-            }}
-            style={{
-              flex: 1, fontSize: 16, fontWeight: 600, color: "var(--text)",
-              border: "1px solid var(--accent)", borderRadius: "var(--radius)",
-              padding: "4px 8px", background: "var(--bg)", outline: "none",
-            }}
-          />
-        ) : (
-          <h3
-            onClick={() => { setTitleDraft(release.title); setEditingTitle(true); }}
-            style={{ flex: 1, margin: 0, fontSize: 16, fontWeight: 600, color: "var(--text)", cursor: "text", lineHeight: 1.3 }}
-            title="Click to rename"
-          >
-            {release.title}
-          </h3>
+      {/* Version strip — milestone-family lineage. Reads:
+            VERSION HISTORY: [v1] [v2] [v3 · current]   + New version
+          Each pill is a switch (clicking jumps to that version's
+          snapshot). The current version is visually highlighted; older
+          versions are subtler, signalling "snapshot" before the user
+          even clicks. + New version always clones FROM the current
+          selection — so cloning from v1 makes v4-from-v1, cloning from
+          v3 makes v4-from-v3. Lineage is preserved in the audit log on
+          both sides. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+        padding: "6px 10px", borderRadius: "var(--radius)",
+        background: "var(--bg-sunken)", border: "1px solid var(--border)",
+      }}>
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
+          textTransform: "uppercase", color: "var(--text-tertiary)",
+          whiteSpace: "nowrap",
+        }}>
+          Version history
+        </span>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {familyVersions.map(v => {
+            const isCurrent = v.id === familyVersions[familyVersions.length - 1].id;
+            const isActive = v.id === release.id;
+            return (
+              <button
+                key={v.id}
+                onClick={() => onSelectVersion?.(v.id)}
+                disabled={!onSelectVersion || isActive}
+                title={v.versionSummary
+                  ? `${v.versionLabel} — ${v.versionSummary}${isCurrent ? " · current" : ""}`
+                  : `${v.versionLabel}${isCurrent ? " · current" : " · snapshot"}`}
+                style={{
+                  padding: "1px 10px", borderRadius: 100,
+                  border: isActive
+                    ? `1px solid ${isCurrent ? "#15803d" : "var(--accent)"}`
+                    : "1px solid var(--border)",
+                  background: isActive
+                    ? (isCurrent ? "rgba(34,197,94,0.10)" : "var(--accent-soft)")
+                    : (isCurrent ? "rgba(34,197,94,0.04)" : "var(--bg)"),
+                  color: isCurrent ? "#15803d" : "var(--text-secondary)",
+                  fontSize: 11, fontWeight: 600,
+                  cursor: isActive || !onSelectVersion ? "default" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {v.versionLabel}{isCurrent ? " · current" : ""}
+              </button>
+            );
+          })}
+        </div>
+        {release.versionSummary && (
+          <span style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.4 }}>
+            — {release.versionSummary}
+          </span>
         )}
-        <ReleaseStatusPicker
-          status={release.status}
-          onChange={(s) => updateRelease(release.id, { status: s })}
-        />
+        <span style={{ flex: 1 }} />
         <button
-          onClick={() => { if (window.confirm(`Delete release "${release.title}"? Linked objects stay where they are.`)) deleteRelease(release.id); }}
-          aria-label="Delete release"
-          title="Delete release"
-          style={{
-            padding: 4, color: "var(--text-tertiary)",
-            background: "transparent", border: "none", cursor: "pointer",
-            borderRadius: "var(--radius-sm)",
+          onClick={() => {
+            const summary = window.prompt(
+              `Short note for the new version (what's changing in this draft?)`,
+              "",
+            );
+            if (summary === null) return; // user cancelled
+            const newId = cloneRelease(release.id, { summary: summary.trim() || undefined });
+            onSelectVersion?.(newId);
           }}
-          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+          title={isLatestInFamily
+            ? "Create a new version of this milestone (clones scope as a starting point; lineage preserved)"
+            : `Create a new version from this snapshot (${release.versionLabel}) — current ${familyVersions[familyVersions.length - 1].versionLabel} is left untouched`}
+          style={{
+            padding: "3px 10px", borderRadius: 100,
+            background: "var(--bg)", border: "1px solid var(--border)",
+            color: "var(--text-secondary)",
+            fontSize: 11, fontWeight: 500, cursor: "pointer",
+          }}
         >
-          <X size={11} />
+          {isLatestInFamily ? "+ New version" : `+ New version from ${release.versionLabel}`}
         </button>
       </div>
 
-      {/* Description — click to edit, compact when empty */}
-      <div>
-        {editingDesc ? (
-          <textarea
-            autoFocus
-            value={descDraft}
-            onChange={e => setDescDraft(e.target.value)}
-            onBlur={() => { updateRelease(release.id, { description: descDraft }); setEditingDesc(false); }}
-            rows={2}
-            placeholder="Short description (optional)…"
-            style={{
-              width: "100%", boxSizing: "border-box",
-              padding: "6px 9px",
-              border: "1px solid var(--accent)", borderRadius: "var(--radius)",
-              background: "var(--bg)", color: "var(--text)",
-              fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
-              resize: "vertical",
+      {/* Snapshot banner — only when viewing a non-current version. The
+          spec calls this out explicitly: older versions are historical
+          snapshots, not edit targets. The header chrome above already
+          locks Configure / Delete / inline edits; this banner makes the
+          state visible. */}
+      {!isLatestInFamily && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "8px 12px",
+          borderRadius: "var(--radius)",
+          background: "var(--bg-sunken)",
+          border: "1px dashed var(--border-strong)",
+          color: "var(--text-secondary)",
+          fontSize: 12, lineHeight: 1.5,
+        }}>
+          <span style={{
+            fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
+            textTransform: "uppercase", color: "#b45309",
+            background: "rgba(245,158,11,0.10)",
+            border: "1px solid rgba(245,158,11,0.45)",
+            borderRadius: 100, padding: "1px 8px",
+            whiteSpace: "nowrap",
+          }}>
+            Viewing {release.versionLabel} snapshot
+          </span>
+          <span style={{ flex: 1 }}>
+            This version is a historical snapshot — read-only. To evolve it,
+            create a new version from this snapshot (the current version stays unchanged).
+          </span>
+        </div>
+      )}
+
+      {/* Header — full-width milestone summary. Title + status pill +
+          target date + delete sit on one row; the description sits
+          below. Reads as the milestone's "identity row" instead of a
+          stack of cramped inputs. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={e => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                const next = titleDraft.trim() || release.title;
+                if (next !== release.title) {
+                  updateRelease(release.id, { title: next });
+                  recordMilestoneAudit(release.id, `Renamed to "${next}"`, {
+                    kind: "renamed",
+                    previousValue: release.title,
+                    nextValue: next,
+                  });
+                }
+                setEditingTitle(false);
+              }}
+              onKeyDown={e => {
+                if (e.key === "Enter") {
+                  const next = titleDraft.trim() || release.title;
+                  if (next !== release.title) {
+                    updateRelease(release.id, { title: next });
+                    recordMilestoneAudit(release.id, `Renamed to "${next}"`, {
+                      kind: "renamed",
+                      previousValue: release.title,
+                      nextValue: next,
+                    });
+                  }
+                  setEditingTitle(false);
+                }
+                else if (e.key === "Escape") { setTitleDraft(release.title); setEditingTitle(false); }
+              }}
+              style={{
+                flex: 1, minWidth: 240,
+                fontSize: 20, fontWeight: 600, color: "var(--text)",
+                border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+                padding: "5px 10px", background: "var(--bg)", outline: "none",
+              }}
+            />
+          ) : (
+            <h2
+              onClick={() => { if (!isLatestInFamily) return; setTitleDraft(release.title); setEditingTitle(true); }}
+              style={{ flex: 1, minWidth: 240, margin: 0, fontSize: 20, fontWeight: 600, color: "var(--text)", cursor: isLatestInFamily ? "text" : "default", lineHeight: 1.25 }}
+              title={isLatestInFamily ? "Click to rename" : "Snapshot — create a new version to edit"}
+            >
+              {release.title}
+            </h2>
+          )}
+          <ReleaseStatusPicker
+            status={release.status}
+            onChange={(s) => {
+              if (s === release.status) return;
+              const prevLabel = RELEASE_STATUS_LABEL[release.status];
+              const nextLabel = RELEASE_STATUS_LABEL[s];
+              updateRelease(release.id, { status: s });
+              recordMilestoneAudit(
+                release.id,
+                `Status changed from ${prevLabel} to ${nextLabel}`,
+                { kind: "status_changed", previousValue: prevLabel, nextValue: nextLabel },
+              );
             }}
           />
-        ) : release.description ? (
+          {/* Target date / range — moved into the header row so the
+              identity strip reads like "name · status · target". */}
+          {editingDates ? (
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              <input
+                type="date"
+                value={startDraft}
+                onChange={e => setStartDraft(e.target.value)}
+                style={dateInputStyle()}
+              />
+              <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>—</span>
+              <input
+                type="date"
+                value={endDraft}
+                onChange={e => setEndDraft(e.target.value)}
+                style={dateInputStyle()}
+              />
+              <button
+                onClick={() => {
+                  const nextStart = startDraft ? new Date(startDraft).toISOString() : undefined;
+                  const nextEnd   = endDraft   ? new Date(endDraft).toISOString()   : undefined;
+                  const prevLabel = formatReleaseTargetLabel(release.targetStart, release.targetEnd) ?? "no date";
+                  const nextLabel = formatReleaseTargetLabel(nextStart, nextEnd) ?? "no date";
+                  updateRelease(release.id, { targetStart: nextStart, targetEnd: nextEnd });
+                  if (prevLabel !== nextLabel) {
+                    recordMilestoneAudit(
+                      release.id,
+                      `Date changed from ${prevLabel} to ${nextLabel}`,
+                      { kind: "date_changed", previousValue: prevLabel, nextValue: nextLabel },
+                    );
+                  }
+                  setEditingDates(false);
+                }}
+                style={{
+                  padding: "3px 10px", borderRadius: "var(--radius)",
+                  background: "var(--accent)", color: "white",
+                  border: "none", fontSize: 11, fontWeight: 500, cursor: "pointer",
+                }}
+              >Save</button>
+              <button
+                onClick={() => {
+                  setStartDraft(release.targetStart?.slice(0, 10) ?? "");
+                  setEndDraft(release.targetEnd?.slice(0, 10) ?? "");
+                  setEditingDates(false);
+                }}
+                style={{
+                  padding: "3px 8px", borderRadius: "var(--radius)",
+                  background: "transparent", color: "var(--text-secondary)",
+                  border: "1px solid var(--border)", fontSize: 11, cursor: "pointer",
+                }}
+              >Cancel</button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { if (isLatestInFamily) setEditingDates(true); }}
+              disabled={!isLatestInFamily}
+              style={{
+                padding: "4px 10px", borderRadius: "var(--radius)",
+                background: "transparent",
+                color: dateLabel ? "var(--text-secondary)" : "var(--text-tertiary)",
+                border: isLatestInFamily ? "1px dashed var(--border-strong)" : "1px solid var(--border)",
+                fontSize: 11, cursor: isLatestInFamily ? "pointer" : "default", whiteSpace: "nowrap",
+              }}
+              title={isLatestInFamily ? "Click to set a target date or range" : "Snapshot — create a new version to edit"}
+            >
+              {dateLabel ?? (isLatestInFamily ? "Set target date or range" : "No date")}
+            </button>
+          )}
+          {isLatestInFamily && (
+            <button
+              onClick={() => setMode(m => m === "review" ? "configure" : "review")}
+              title={mode === "review" ? "Switch to Configure to edit scope, MoSCoW, dates, and linking" : "Switch back to the compact Review view"}
+              style={{
+                padding: "3px 10px", borderRadius: 100,
+                border: mode === "configure" ? "1px solid var(--accent)" : "1px solid var(--border)",
+                background: mode === "configure" ? "var(--accent-soft)" : "var(--bg)",
+                color: mode === "configure" ? "var(--accent)" : "var(--text-secondary)",
+                fontSize: 11, fontWeight: 500, cursor: "pointer",
+              }}
+            >
+              {mode === "review" ? "Configure" : "Done"}
+            </button>
+          )}
           <button
-            onClick={() => { setDescDraft(release.description ?? ""); setEditingDesc(true); }}
+            onClick={() => { if (window.confirm(`Delete milestone "${release.title}"? Linked objects stay where they are.`)) deleteRelease(release.id); }}
+            aria-label="Delete milestone"
+            title="Delete milestone"
+            hidden={!isLatestInFamily}
             style={{
-              width: "100%", textAlign: "left",
-              padding: "6px 9px", border: "1px solid var(--border)",
-              borderRadius: "var(--radius)", background: "var(--bg-sunken)",
-              color: "var(--text-secondary)", fontSize: "var(--fs-body)", lineHeight: 1.5,
-              cursor: "text",
-            }}
-            title="Click to edit description"
-          >
-            {release.description}
-          </button>
-        ) : (
-          <button
-            onClick={() => { setDescDraft(""); setEditingDesc(true); }}
-            style={{
-              padding: "2px 4px", fontSize: 11, color: "var(--text-tertiary)",
+              padding: 4, color: "var(--text-tertiary)",
               background: "transparent", border: "none", cursor: "pointer",
+              borderRadius: "var(--radius-sm)",
             }}
+            onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
           >
-            + Add description
+            <X size={12} />
           </button>
-        )}
+        </div>
+
+        {/* Description — click to edit. Stays inside the header so the
+            identity strip reads top-to-bottom: name → meta → context. */}
+        <div>
+          {editingDesc ? (
+            <textarea
+              autoFocus
+              value={descDraft}
+              onChange={e => setDescDraft(e.target.value)}
+              onBlur={() => {
+                const prev = release.description ?? "";
+                const next = descDraft;
+                if (next !== prev) {
+                  updateRelease(release.id, { description: next });
+                  const truncate = (s: string) => s.length > 80 ? s.slice(0, 77) + "…" : s;
+                  recordMilestoneAudit(
+                    release.id,
+                    prev === "" ? "Description added" : next.trim() === "" ? "Description removed" : "Description updated",
+                    {
+                      kind: "description_changed",
+                      previousValue: prev ? truncate(prev) : "",
+                      nextValue: next ? truncate(next) : "",
+                    },
+                  );
+                }
+                setEditingDesc(false);
+              }}
+              rows={2}
+              placeholder="Short description (optional)…"
+              style={{
+                width: "100%", boxSizing: "border-box",
+                padding: "6px 10px",
+                border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+                background: "var(--bg)", color: "var(--text)",
+                fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
+                resize: "vertical",
+              }}
+            />
+          ) : release.description ? (
+            <button
+              onClick={() => { if (!isLatestInFamily) return; setDescDraft(release.description ?? ""); setEditingDesc(true); }}
+              style={{
+                width: "100%", textAlign: "left",
+                padding: "6px 10px", border: "1px solid var(--border)",
+                borderRadius: "var(--radius)", background: "var(--bg-sunken)",
+                color: "var(--text-secondary)", fontSize: "var(--fs-body)", lineHeight: 1.5,
+                cursor: isLatestInFamily ? "text" : "default",
+              }}
+              title={isLatestInFamily ? "Click to edit description" : "Snapshot — create a new version to edit"}
+            >
+              {release.description}
+            </button>
+          ) : isLatestInFamily ? (
+            <button
+              onClick={() => { setDescDraft(""); setEditingDesc(true); }}
+              style={{
+                padding: "3px 8px", fontSize: 11, color: "var(--text-tertiary)",
+                background: "transparent", border: "1px dashed var(--border-strong)",
+                borderRadius: "var(--radius)",
+                cursor: "pointer",
+              }}
+            >
+              + Add description
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      {/* Target date / range — click to edit. We treat both inputs as
-          optional so the user can ship a single target or a range. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-          Target
-        </span>
-        {editingDates ? (
-          <>
-            <input
-              type="date"
-              value={startDraft}
-              onChange={e => setStartDraft(e.target.value)}
-              style={dateInputStyle()}
+      {/* ── Review mode body ── content-first compact summary. Used by
+          default; clicking Configure flips into the editor body
+          rendered below. Reads name → date → description (already
+          above) then: scope summary, MoSCoW summary bar, top scope
+          items, related weekly goals. */}
+      {mode === "review" && (
+        <MilestoneReviewSummary
+          release={release}
+          productLinks={productLinks}
+          byPriority={byPriority}
+          linkedGoals={linkedGoals}
+          onOpenConfigure={() => setMode("configure")}
+          onOpenGoal={(id) => setRoadmapFocus({ tab: "weekly", goalId: id })}
+        />
+      )}
+
+      {/* 2-column body — MoSCoW scope (main) on the left, side panel
+          (related goals + search hints) on the right. Collapses to a
+          single column under ~860px so it still reads on narrower
+          windows. Only rendered in Configure mode. */}
+      {mode === "configure" && (
+      <div style={{
+        display: "flex", gap: 16, alignItems: "flex-start",
+        flexWrap: "wrap",
+      }}>
+        {/* LEFT — Product scope with MoSCoW grouping. flex:2 with a
+            generous min-width so the cards/rows breathe. */}
+        <div style={{ flex: "2 1 540px", minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 10,
+            padding: "12px 14px", borderRadius: "var(--radius)",
+            background: "var(--bg-sunken)", border: "1px solid var(--border)",
+          }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text)" }}>
+                Product scope
+              </span>
+              <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                · {productLinks.length} item{productLinks.length === 1 ? "" : "s"} · MoSCoW is per milestone
+              </span>
+              <span style={{ flex: 1 }} />
+              <MilestoneProductAutosuggest release={release} />
+            </div>
+
+            {productLinks.length === 0 && (
+              <div style={{
+                fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.55,
+                padding: "10px 2px",
+              }}>
+                No product scope yet. Use the search above to add Capability Areas, Feature Sets, Features, Feature Slices, or Capabilities. Higher-level objects like Feature Sets are useful when the exact slices aren't known yet — a Must-have Feature Set means "a shippable version of this area," not "every child slice is required." Each new link starts as Must-have and can be demoted inline.
+              </div>
+            )}
+
+            {/* Four MoSCoW buckets, stacked. */}
+            {(["must", "should", "could", "wont"] as MoscowPriority[]).map(p => {
+              const rows = byPriority[p];
+              return (
+                <MoscowGroup
+                  key={p}
+                  priority={p}
+                  rows={rows}
+                  onChangePriority={(row, next) => {
+                    if (row.priority === next) return;
+                    const objectLabel = `${MILESTONE_OBJECT_KIND_LABEL[row.kind]} · ${row.title}`;
+                    setMilestoneObjectPriority(release.id, row.kind, row.objectId, next);
+                    recordMilestoneAudit(
+                      release.id,
+                      `Moved ${objectLabel} from ${moscowAuditLabel(row.priority)} to ${moscowAuditLabel(next)}`,
+                      {
+                        kind: "moscow_changed",
+                        objectLabel,
+                        previousValue: moscowFullLabel(row.priority),
+                        nextValue: moscowFullLabel(next),
+                      },
+                    );
+                  }}
+                  onChangeNote={(row, next) => {
+                    const prev = row.note ?? "";
+                    if (next === prev) return;
+                    const objectLabel = `${MILESTONE_OBJECT_KIND_LABEL[row.kind]} · ${row.title}`;
+                    setMilestoneObjectNote(release.id, row.kind, row.objectId, next);
+                    const verb = prev === "" ? "Added note on" : next.trim() === "" ? "Removed note from" : "Updated note on";
+                    const truncate = (s: string) => s.length > 60 ? s.slice(0, 57) + "…" : s;
+                    recordMilestoneAudit(
+                      release.id,
+                      `${verb} ${objectLabel}`,
+                      {
+                        kind: "note_changed",
+                        objectLabel,
+                        previousValue: prev ? truncate(prev) : "",
+                        nextValue: next ? truncate(next) : "",
+                      },
+                    );
+                  }}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {/* RIGHT — Side panel with milestone "why" + add affordances. */}
+        <aside style={{ flex: "1 1 320px", minWidth: 280, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 6,
+            padding: "12px 14px", borderRadius: "var(--radius)",
+            background: "var(--bg)", border: "1px solid var(--border)",
+          }}>
+            <LinkedSection
+              title="Related weekly goals"
+              items={linkedGoals.map(g => ({
+                id: g.id, label: g.title,
+                right: <span style={subtleParentPill()}>{g.weekLabel}</span>,
+                onOpen: () => setRoadmapFocus({ tab: "weekly", goalId: g.id }),
+              }))}
+              addPicker={
+                <GoalPicker
+                  value={release.linkedGoalIds}
+                  onToggle={(id) => {
+                    const goal = weeklyGoals.find(g => g.id === id);
+                    const wasLinked = release.linkedGoalIds.includes(id);
+                    toggleReleaseGoal(release.id, id);
+                    if (goal) {
+                      recordMilestoneAudit(
+                        release.id,
+                        `${wasLinked ? "Unlinked" : "Linked"} weekly goal · ${goal.title}`,
+                        {
+                          kind: wasLinked ? "goal_unlinked" : "goal_linked",
+                          objectLabel: `Weekly Goal · ${goal.title}`,
+                        },
+                      );
+                    }
+                  }}
+                />
+              }
+              emptyHint="No weekly goals related to this milestone yet."
             />
-            <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>—</span>
-            <input
-              type="date"
-              value={endDraft}
-              onChange={e => setEndDraft(e.target.value)}
-              style={dateInputStyle()}
-            />
-            <button
-              onClick={() => {
-                updateRelease(release.id, {
-                  targetStart: startDraft ? new Date(startDraft).toISOString() : undefined,
-                  targetEnd:   endDraft   ? new Date(endDraft).toISOString()   : undefined,
-                });
-                setEditingDates(false);
-              }}
-              style={{
-                padding: "3px 10px", borderRadius: "var(--radius)",
-                background: "var(--accent)", color: "white",
-                border: "none", fontSize: 11, fontWeight: 500, cursor: "pointer",
-              }}
-            >Save</button>
-            <button
-              onClick={() => {
-                setStartDraft(release.targetStart?.slice(0, 10) ?? "");
-                setEndDraft(release.targetEnd?.slice(0, 10) ?? "");
-                setEditingDates(false);
-              }}
-              style={{
-                padding: "3px 8px", borderRadius: "var(--radius)",
-                background: "transparent", color: "var(--text-secondary)",
-                border: "1px solid var(--border)", fontSize: 11, cursor: "pointer",
-              }}
-            >Cancel</button>
-          </>
-        ) : (
-          <button
-            onClick={() => setEditingDates(true)}
-            style={{
-              padding: "2px 8px", borderRadius: "var(--radius)",
-              background: "transparent",
-              color: dateLabel ? "var(--text-secondary)" : "var(--text-tertiary)",
-              border: "1px dashed var(--border-strong)",
-              fontSize: 11, cursor: "pointer", whiteSpace: "nowrap",
-            }}
-            title="Click to set a target date or range"
-          >
-            {dateLabel ?? "Set target date or range"}
-          </button>
-        )}
+          </div>
+
+          {/* Tiny helper card — explains what the MoSCoW levels mean,
+              kept in the side panel so the main scope area doesn't
+              carry it on every milestone. */}
+          <div style={{
+            padding: "10px 12px", borderRadius: "var(--radius)",
+            background: "var(--bg-sunken)", border: "1px dashed var(--border)",
+            fontSize: 10.5, color: "var(--text-tertiary)", lineHeight: 1.55,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
+              MoSCoW reminder
+            </div>
+            <div><strong style={{ color: "#15803d" }}>Must-have</strong> — required to ship the milestone.</div>
+            <div><strong style={{ color: "#1d4ed8" }}>Should-have</strong> — helpful but not blocking.</div>
+            <div><strong style={{ color: "#b45309" }}>Could-have</strong> — nice if time allows.</div>
+            <div><strong style={{ color: "var(--text-secondary)" }}>Won't-have</strong> — explicitly out of scope.</div>
+          </div>
+        </aside>
       </div>
+      )}
 
-      {/* Linked goals */}
-      <LinkedSection
-        title="Linked goals"
-        items={linkedGoals.map(g => ({
-          id: g.id, label: g.title,
-          right: <span style={subtleParentPill()}>{g.weekLabel}</span>,
-          onOpen: () => setRoadmapFocus({ tab: "weekly", goalId: g.id }),
-        }))}
-        addPicker={
-          <GoalPicker
-            value={release.linkedGoalIds}
-            onToggle={(id) => toggleReleaseGoal(release.id, id)}
-          />
-        }
-        emptyHint="No goals linked yet."
-      />
-
-      {/* Linked features */}
-      <LinkedSection
-        title="Linked features"
-        items={linkedFeatures.map(f => ({
-          id: f.id, label: f.title,
-          onOpen: () => setRoadmapFocus({ tab: "product", featureId: f.id }),
-        }))}
-        addPicker={
-          <FeaturePicker
-            value={release.linkedFeatureIds}
-            onToggle={(id) => toggleReleaseFeature(release.id, id)}
-          />
-        }
-        emptyHint="No features linked yet."
-      />
-
-      {/* Linked feature slices */}
-      <LinkedSection
-        title="Linked feature slices"
-        items={linkedSlices.map(s => {
-          const parent = features.find(f => f.id === s.featureId);
-          return {
-            id: s.id, label: s.title,
-            right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-            onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
-          };
-        })}
-        addPicker={
-          <SlicePicker
-            value={release.linkedSliceIds}
-            onToggle={(id) => toggleReleaseSlice(release.id, id)}
-          />
-        }
-        emptyHint="No feature slices linked yet."
-      />
-
-      {/* Linked capabilities */}
-      <LinkedSection
-        title="Linked product capabilities"
-        items={linkedCapabilities.map(c => {
-          const parent = features.find(f => f.id === c.featureId);
-          return {
-            id: c.id, label: c.title,
-            right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-            onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
-          };
-        })}
-        addPicker={
-          <CapabilityPicker
-            value={release.linkedCapabilityIds}
-            onToggle={(id) => toggleReleaseCapability(release.id, id)}
-          />
-        }
-        emptyHint="No product capabilities linked yet."
-      />
+      {/* Change history — audit log of every recorded mutation on this
+          version. Only visible in Configure mode (Review keeps things
+          calm). Most-recent entries first; the very first row of every
+          milestone is the "Created milestone" entry, so the log is
+          never empty. */}
+      {mode === "configure" && release.auditLog.length > 0 && (
+        <MilestoneAuditLog log={release.auditLog} versionLabel={release.versionLabel} />
+      )}
 
       {/* Theme tags — overlay row. Hidden while THEMES_ENABLED is false. */}
       {THEMES_ENABLED && (
@@ -4143,6 +5368,343 @@ function ReleaseCard({ release }: { release: Release }) {
       )}
     </div>
   );
+}
+
+// ── MilestoneReviewSummary ─────────────────────────────────────────────
+// Compact, content-first body shown when ReleaseCard is in Review mode.
+// Mirrors the Weekly Goal Review summary pattern — top labels are tiny
+// & uppercase, the actual content reads first. Reads top to bottom:
+//   • Scope summary  — one line, e.g. "12 items · 6 Must · 4 Should · 2 Could"
+//   • MoSCoW excerpt — one row per non-empty priority, first 3 items
+//                       per row + "+N more" overflow
+//   • Goals          — read-only list of related weekly goals
+// All clicks fall through to the parent ("open this goal", "open
+// Configure to edit"). No pickers, no inputs.
+function MilestoneReviewSummary({
+  release, productLinks, byPriority, linkedGoals,
+  onOpenConfigure, onOpenGoal,
+}: {
+  release: Release;
+  productLinks: MilestoneRow[];
+  byPriority: Record<MoscowPriority, MilestoneRow[]>;
+  linkedGoals: WeeklyGoal[];
+  onOpenConfigure: () => void;
+  onOpenGoal: (id: string) => void;
+}) {
+  const counts: Record<MoscowPriority, number> = {
+    must:   byPriority.must.length,
+    should: byPriority.should.length,
+    could:  byPriority.could.length,
+    wont:   byPriority.wont.length,
+  };
+  const totalScope = productLinks.length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* SCOPE ROW — counts + click-to-edit hint when empty */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={reviewLabelStyle()}>Scope</span>
+        {totalScope === 0 ? (
+          <span style={reviewSecondaryStyle()}>
+            No product scope yet ·{" "}
+            <button
+              onClick={onOpenConfigure}
+              style={{
+                background: "transparent", border: "none", padding: 0,
+                color: "var(--accent)", fontSize: "inherit", cursor: "pointer",
+                textDecoration: "underline",
+              }}
+            >
+              add some
+            </button>
+          </span>
+        ) : (
+          <>
+            <span style={{ fontSize: "var(--fs-body)", color: "var(--text)", lineHeight: 1.5 }}>
+              {totalScope} item{totalScope === 1 ? "" : "s"}
+              {(["must", "should", "could", "wont"] as MoscowPriority[]).map(p =>
+                counts[p] > 0
+                  ? ` · ${counts[p]} ${moscowAuditLabel(p)}`
+                  : "",
+              ).join("")}
+            </span>
+            {/* MoSCoW excerpts — one row per non-empty priority. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
+              {(["must", "should", "could", "wont"] as MoscowPriority[]).map(p => {
+                const rows = byPriority[p];
+                if (rows.length === 0) return null;
+                const head = rows.slice(0, 3);
+                const more = rows.length - head.length;
+                return (
+                  <div
+                    key={p}
+                    style={{
+                      display: "flex", alignItems: "baseline",
+                      gap: 6, flexWrap: "wrap",
+                      fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5,
+                    }}
+                  >
+                    <span style={compactMoscowCountPill(p)}>
+                      {moscowAuditLabel(p)}
+                    </span>
+                    {head.map((r, i) => (
+                      <React.Fragment key={`${r.kind}:${r.objectId}`}>
+                        {i > 0 && <span style={{ color: "var(--text-tertiary)" }}>·</span>}
+                        <button
+                          onClick={() => r.onOpen?.()}
+                          title={`${MILESTONE_OBJECT_KIND_LABEL[r.kind]} · ${r.title}`}
+                          style={{
+                            background: "transparent", border: "none", padding: 0,
+                            color: "var(--text)", fontSize: "inherit", cursor: r.onOpen ? "pointer" : "default",
+                            textAlign: "left",
+                          }}
+                        >
+                          <span style={{ fontSize: 10, color: "var(--text-tertiary)", marginRight: 4, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                            {MILESTONE_OBJECT_KIND_LABEL[r.kind]}
+                          </span>
+                          {r.title}
+                          {r.parentTitle && (
+                            <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
+                              {" "}· {r.parentTitle}
+                            </span>
+                          )}
+                        </button>
+                      </React.Fragment>
+                    ))}
+                    {more > 0 && (
+                      <button
+                        onClick={onOpenConfigure}
+                        style={{
+                          background: "transparent", border: "none", padding: 0,
+                          color: "var(--text-tertiary)", fontSize: "inherit", cursor: "pointer",
+                          textDecoration: "underline",
+                        }}
+                        title="Open Configure to see all scope items"
+                      >
+                        +{more} more
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* RELATED GOALS — read-only list. Click jumps to Weekly Goals. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={reviewLabelStyle()}>Related weekly goals</span>
+        {linkedGoals.length === 0 ? (
+          <span style={reviewSecondaryStyle()}>None linked yet</span>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {linkedGoals.map(g => (
+              <button
+                key={g.id}
+                onClick={() => onOpenGoal(g.id)}
+                title={`Open weekly goal · ${g.title}`}
+                style={{
+                  padding: "3px 9px", borderRadius: 100,
+                  background: "var(--bg-sunken)", border: "1px solid var(--border)",
+                  color: "var(--text-secondary)", fontSize: 11, lineHeight: 1.4,
+                  cursor: "pointer", textAlign: "left",
+                }}
+              >
+                {g.title}
+                <span style={{ color: "var(--text-tertiary)", marginLeft: 6 }}>{g.weekLabel}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Read-only milestone description repeat — suppressed: the
+          description already shows above the Review block in the
+          header, and we don't want to double-print it here. */}
+    </div>
+  );
+}
+
+// ── MilestoneAuditLog ───────────────────────────────────────────────────
+// Append-only change history list. Most-recent first; the timestamp on
+// each line is relative ("3 days ago") to keep the strip scannable
+// without a long ISO running down the column. Collapsed by default to
+// the latest 6 entries — older entries reveal on demand so a heavily
+// edited milestone doesn't dominate the card.
+function MilestoneAuditLog({ log, versionLabel }: { log: MilestoneAuditEntry[]; versionLabel: string }) {
+  const [expanded, setExpanded] = useState(false);
+  // Most-recent first, immutable copy.
+  const ordered = log.slice().sort((a, b) => b.at.localeCompare(a.at));
+  const visible = expanded ? ordered : ordered.slice(0, 6);
+  const hidden = ordered.length - visible.length;
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 6,
+      padding: "10px 12px", borderRadius: "var(--radius)",
+      background: "var(--bg-sunken)", border: "1px dashed var(--border)",
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+          textTransform: "uppercase", color: "var(--text-tertiary)",
+        }}>
+          Change history · {versionLabel}
+        </span>
+        <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+          {ordered.length} entr{ordered.length === 1 ? "y" : "ies"}
+        </span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {visible.map(e => (
+          <AuditLogRow key={e.id} entry={e} />
+        ))}
+      </div>
+      {hidden > 0 && !expanded && (
+        <button
+          onClick={() => setExpanded(true)}
+          style={{
+            alignSelf: "flex-start",
+            background: "transparent", border: "none", padding: 0,
+            color: "var(--text-tertiary)", fontSize: 10.5, cursor: "pointer",
+            textDecoration: "underline",
+          }}
+        >
+          Show {hidden} older
+        </button>
+      )}
+      {expanded && ordered.length > 6 && (
+        <button
+          onClick={() => setExpanded(false)}
+          style={{
+            alignSelf: "flex-start",
+            background: "transparent", border: "none", padding: 0,
+            color: "var(--text-tertiary)", fontSize: 10.5, cursor: "pointer",
+            textDecoration: "underline",
+          }}
+        >
+          Show fewer
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── AuditLogRow ─────────────────────────────────────────────────────────
+// Single audit-log row. Renders the structured "what · object · before
+// → after" layout when the entry has a `kind`; falls back to plain
+// summary text for legacy entries that pre-date the structured shape.
+function AuditLogRow({ entry }: { entry: MilestoneAuditEntry }) {
+  const stamp = (
+    <span style={{ color: "var(--text-tertiary)", whiteSpace: "nowrap", fontSize: 10.5, minWidth: 70 }}>
+      {formatRelativeShort(entry.at)}
+    </span>
+  );
+  // Legacy path — no structured kind; just the summary string.
+  if (!entry.kind) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "baseline", gap: 8,
+        fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.45,
+      }}>
+        {stamp}
+        <span>{entry.summary}</span>
+      </div>
+    );
+  }
+
+  // Structured path — verb on row 1, object on row 2, before → after
+  // on row 3 (rows 2 and 3 only render when their fields are present).
+  const verbLabel = auditKindVerb(entry.kind);
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+      {stamp}
+      <div style={{ display: "flex", flexDirection: "column", gap: 1, flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", lineHeight: 1.4 }}>
+          {verbLabel}
+        </div>
+        {entry.objectLabel && (
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.4 }}>
+            {entry.objectLabel}
+          </div>
+        )}
+        {(entry.previousValue || entry.nextValue) && (
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap",
+            fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.4,
+          }}>
+            {entry.previousValue ? (
+              <span style={{
+                color: "var(--text-tertiary)",
+                textDecoration: entry.kind === "moscow_changed" || entry.kind === "status_changed" || entry.kind === "renamed" || entry.kind === "date_changed" ? "line-through" : undefined,
+              }}>
+                {entry.previousValue}
+              </span>
+            ) : (
+              <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>(unset)</span>
+            )}
+            <span style={{ color: "var(--text-tertiary)" }}>→</span>
+            {entry.nextValue ? (
+              <span style={{ color: "var(--text)", fontWeight: 500 }}>{entry.nextValue}</span>
+            ) : (
+              <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>(unset)</span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Human-readable verb label for each MilestoneAuditKind. Lives next to
+// the row renderer so adding a new kind requires updating both in the
+// same patch.
+function auditKindVerb(k: MilestoneAuditKind): string {
+  switch (k) {
+    case "created":             return "Milestone created";
+    case "cloned_from":         return "Version created from earlier snapshot";
+    case "cloned_to":           return "Cloned to new version";
+    case "renamed":             return "Renamed";
+    case "description_changed": return "Description changed";
+    case "status_changed":      return "Status changed";
+    case "date_changed":        return "Date changed";
+    case "scope_added":         return "Product scope added";
+    case "scope_removed":       return "Product scope removed";
+    case "moscow_changed":      return "MoSCoW changed";
+    case "note_changed":        return "Note changed";
+    case "goal_linked":         return "Weekly goal linked";
+    case "goal_unlinked":       return "Weekly goal unlinked";
+  }
+}
+
+// Audit summary label for a MoSCoW priority — "Must" / "Should" / "Could"
+// / "Won't". Kept as a separate helper so future audit summaries don't
+// each re-implement the label-format inline.
+function moscowAuditLabel(p: MoscowPriority): string {
+  return p === "must" ? "Must" : p === "should" ? "Should" : p === "could" ? "Could" : "Won't";
+}
+// Full audit label for structured before/after pairs — uses the same
+// long form ("Must-have", "Should-have", …) the user sees on rows so
+// the change history reads identically to the UI labels.
+function moscowFullLabel(p: MoscowPriority): string {
+  return MOSCOW_LABEL[p];
+}
+
+// Short relative timestamp used in the audit log — "just now", "12m",
+// "3h", "2d", "Mar 14". No external lib — milestones are short-lived
+// and the audit log only needs to be readable, not exact.
+function formatRelativeShort(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const sec = Math.floor(ms / 1000);
+  if (sec < 30) return "just now";
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function ReleaseStatusPicker({
@@ -4226,23 +5788,28 @@ function formatReleaseTargetLabel(startISO?: string, endISO?: string): string | 
 
 function ReleaseRefList({
   releaseIds,
+  label,
 }: {
   releaseIds: string[];
+  // Customisable label — defaults to "Included in milestones" so slice
+  // cards / feature details read naturally, but goal cards override it
+  // to "Linked milestone" / "Linked milestones" per V1 vocabulary.
+  label?: string;
 }) {
-  const { releases } = useStore();
-  // RoadmapPage owns the tab toggle, so we re-use setRoadmapFocus with
-  // a "releases" target — handled below by extending the focus model.
+  const { releases, setRoadmapFocus } = useStore();
   if (releaseIds.length === 0) return null;
   const linked = releases.filter(r => releaseIds.includes(r.id));
   if (linked.length === 0) return null;
+  const resolvedLabel = label ?? (linked.length === 1 ? "Linked milestone" : "Linked milestones");
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-        Included in releases
+      <span style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
+        {resolvedLabel}
       </span>
       {linked.map(r => (
-        <span
+        <button
           key={r.id}
+          onClick={() => setRoadmapFocus({ tab: "releases" })}
           style={{
             fontSize: 10.5, fontWeight: 500,
             color: "var(--text-secondary)",
@@ -4250,11 +5817,14 @@ function ReleaseRefList({
             border: "1px solid var(--border)",
             borderRadius: 100, padding: "1px 8px",
             whiteSpace: "nowrap",
+            cursor: "pointer",
           }}
-          title={`${r.title} · ${RELEASE_STATUS_LABEL[r.status]}`}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={e => { e.currentTarget.style.background = "var(--bg-sunken)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
+          title={`${r.title} · ${RELEASE_STATUS_LABEL[r.status]} — open the Milestones tab`}
         >
           {r.title}
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -4770,9 +6340,9 @@ function ThemeDetailPane({ themeId }: { themeId: string }) {
         emptyHint="No intents tagged yet."
       />
 
-      {/* Linked releases */}
+      {/* Linked milestones */}
       <LinkedSection
-        title="Linked releases"
+        title="Linked milestones"
         items={linkedReleases.map(r => ({
           id: r.id, label: r.title,
           right: <span style={subtleParentPill()}>{r.status === "in_progress" ? "In Progress" : r.status === "released" ? "Released" : "Planned"}</span>,
@@ -4784,7 +6354,7 @@ function ThemeDetailPane({ themeId }: { themeId: string }) {
             onToggle={(id) => toggleThemeRelease(theme.id, id)}
           />
         }
-        emptyHint="No releases tagged yet."
+        emptyHint="No milestones tagged yet."
       />
     </div>
   );
@@ -4797,7 +6367,7 @@ function ReleasePicker({ value, onToggle }: { value: string[]; onToggle: (id: st
     id: r.id, label: r.title,
     subtitle: r.status === "in_progress" ? "In Progress" : r.status === "released" ? "Released" : "Planned",
   }));
-  return <PickerPopover label="Link release" options={options} value={value} onToggle={onToggle} />;
+  return <PickerPopover label="Link milestone" options={options} value={value} onToggle={onToggle} />;
 }
 
 function ThemeColorPicker({
@@ -4855,6 +6425,849 @@ function ThemeColorPicker({
             );
           })}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── MilestoneProductAutosuggest ─────────────────────────────────────────
+// Unified search-and-add input for milestone product scope. Matches
+// across all five product object kinds (Capability Area / Feature Set /
+// Feature / Slice / Capability) so the user can stay on the Milestones
+// tab while adding scope. Each result row shows its kind chip, title,
+// parent hint, and a green "Already in milestone (Must-have)" pill if
+// the milestone already contains it. Picking a result toggles the link
+// — first click adds (default Must-have), second click removes.
+function MilestoneProductAutosuggest({ release }: { release: Release }) {
+  const {
+    productAreas, featureGroups, features, featureSlices, productCapabilities,
+    toggleReleaseArea, toggleReleaseFeatureGroup, toggleReleaseFeature,
+    toggleReleaseSlice, toggleReleaseCapability,
+    recordMilestoneAudit,
+  } = useStore();
+  // Log "Added <kind> · <title>" / "Removed <kind> · <title>" against
+  // the milestone's audit log. Bundled here so the on-toggle callbacks
+  // in the suggestion list stay one-liners.
+  const auditToggle = (kind: MilestoneObjectKind, title: string, wasIn: boolean) => {
+    const objectLabel = `${MILESTONE_OBJECT_KIND_LABEL[kind]} · ${title}`;
+    recordMilestoneAudit(
+      release.id,
+      `${wasIn ? "Removed" : "Added"} ${objectLabel}`,
+      {
+        kind: wasIn ? "scope_removed" : "scope_added",
+        objectLabel,
+      },
+    );
+  };
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  // Broad planning levels (Capability Area, Feature Set) are now
+  // primary alongside Feature / Slice / Capability — milestone
+  // planning often starts at a higher level (e.g. "Signal review
+  // workflow as a Feature Set is Must-have") before the exact
+  // slices/capabilities are known. Users can hide them again via the
+  // footer checkbox when the scope is fully decomposed.
+  const [showBroad, setShowBroad] = useState(true);
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  type Suggestion = {
+    kind: MilestoneObjectKind;
+    objectId: string;
+    title: string;
+    subtitle?: string;       // parent context
+    alreadyIn: boolean;      // is it already on this milestone?
+    onToggle: () => void;    // add/remove on this milestone
+    isBroad: boolean;        // capability area + feature set — labelled differently in the row
+  };
+
+  const normalized = query.trim().toLowerCase();
+  const match = (title: string, subtitle?: string): boolean => {
+    if (normalized === "") return true;
+    if (title.toLowerCase().includes(normalized)) return true;
+    if (subtitle && subtitle.toLowerCase().includes(normalized)) return true;
+    return false;
+  };
+
+  // ── Primary suggestions: Feature → Slice → Capability. Order this way
+  // so the most-specific objects (capabilities) surface last and the
+  // most-common starting point (features) is first. Cap at 40 to keep
+  // the popover navigable.
+  const primary: Suggestion[] = [];
+  features.forEach(f => {
+    if (!match(f.title, f.description)) return;
+    const area = productAreas.find(a => a.id === f.areaId)?.title;
+    const group = featureGroups.find(gr => gr.id === f.featureGroupId)?.title;
+    const subtitleParts = [area, group].filter(Boolean);
+    primary.push({
+      kind: "feature", objectId: f.id, title: f.title,
+      subtitle: subtitleParts.length ? subtitleParts.join(" · ") : "Unassigned features",
+      alreadyIn: release.linkedFeatureIds.includes(f.id),
+      onToggle: () => {
+        const wasIn = release.linkedFeatureIds.includes(f.id);
+        toggleReleaseFeature(release.id, f.id);
+        auditToggle("feature", f.title, wasIn);
+      },
+      isBroad: false,
+    });
+  });
+  featureSlices.forEach(s => {
+    if (!match(s.title, s.description)) return;
+    const parent = features.find(f => f.id === s.featureId)?.title;
+    primary.push({
+      kind: "slice", objectId: s.id, title: s.title, subtitle: parent,
+      alreadyIn: release.linkedSliceIds.includes(s.id),
+      onToggle: () => {
+        const wasIn = release.linkedSliceIds.includes(s.id);
+        toggleReleaseSlice(release.id, s.id);
+        auditToggle("slice", s.title, wasIn);
+      },
+      isBroad: false,
+    });
+  });
+  productCapabilities.forEach(c => {
+    if (!match(c.title)) return;
+    const parent = features.find(f => f.id === c.featureId)?.title;
+    primary.push({
+      kind: "capability", objectId: c.id, title: c.title, subtitle: parent,
+      alreadyIn: release.linkedCapabilityIds.includes(c.id),
+      onToggle: () => {
+        const wasIn = release.linkedCapabilityIds.includes(c.id);
+        toggleReleaseCapability(release.id, c.id);
+        auditToggle("capability", c.title, wasIn);
+      },
+      isBroad: false,
+    });
+  });
+
+  // ── Broad planning levels: only built when the toggle is on. They
+  // render after the primary list with a clear visual separator + a
+  // "Broad planning level" label so the user understands the difference.
+  const broad: Suggestion[] = [];
+  if (showBroad) {
+    productAreas.forEach(a => {
+      if (!match(a.title, a.description)) return;
+      broad.push({
+        kind: "area", objectId: a.id, title: a.title, subtitle: a.description,
+        alreadyIn: release.linkedAreaIds.includes(a.id),
+        onToggle: () => {
+          const wasIn = release.linkedAreaIds.includes(a.id);
+          toggleReleaseArea(release.id, a.id);
+          auditToggle("area", a.title, wasIn);
+        },
+        isBroad: true,
+      });
+    });
+    featureGroups.forEach(g => {
+      if (!match(g.title)) return;
+      const parent = productAreas.find(a => a.id === g.areaId)?.title;
+      broad.push({
+        kind: "group", objectId: g.id, title: g.title, subtitle: parent,
+        alreadyIn: release.linkedFeatureGroupIds.includes(g.id),
+        onToggle: () => {
+          const wasIn = release.linkedFeatureGroupIds.includes(g.id);
+          toggleReleaseFeatureGroup(release.id, g.id);
+          auditToggle("group", g.title, wasIn);
+        },
+        isBroad: true,
+      });
+    });
+  }
+
+  const primaryTop = primary.slice(0, 30);
+  const broadTop   = broad.slice(0, 15);
+
+  const renderRow = (s: Suggestion) => (
+    <button
+      key={`${s.kind}:${s.objectId}`}
+      onClick={() => s.onToggle()}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 8,
+        width: "100%", padding: "6px 10px", textAlign: "left",
+        background: "transparent", border: "none", cursor: "pointer",
+      }}
+      onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+    >
+      <span style={productHitKindPill(s.kind)}>{MILESTONE_OBJECT_KIND_LABEL[s.kind]}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+        }}>
+          <span style={{
+            fontSize: "var(--fs-body)", color: "var(--text)",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {s.title}
+          </span>
+          {s.isBroad && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+              color: "var(--text-tertiary)",
+              background: "var(--bg-sunken)",
+              border: "1px solid var(--border)",
+              borderRadius: 100, padding: "0 6px",
+              whiteSpace: "nowrap",
+            }}>
+              BROAD PLANNING LEVEL
+            </span>
+          )}
+        </div>
+        {s.subtitle && (
+          <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {s.subtitle}
+          </div>
+        )}
+      </div>
+      {s.alreadyIn ? (
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+          color: "#15803d",
+          background: "rgba(34,197,94,0.12)",
+          border: "1px solid rgba(34,197,94,0.45)",
+          borderRadius: 100, padding: "1px 7px",
+          whiteSpace: "nowrap",
+        }}>
+          IN MILESTONE
+        </span>
+      ) : (
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+          color: "var(--accent)",
+          background: "var(--accent-soft)",
+          border: "1px solid var(--accent)",
+          borderRadius: 100, padding: "1px 7px",
+          whiteSpace: "nowrap",
+        }}>
+          + ADD
+        </span>
+      )}
+    </button>
+  );
+
+  const totalShown = primaryTop.length + broadTop.length;
+
+  return (
+    <div ref={ref} style={{ position: "relative", flex: "0 1 320px", minWidth: 240 }}>
+      <input
+        value={query}
+        onChange={e => { setQuery(e.target.value); if (!open) setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder="Search Capability Areas, Feature Sets, Features, Slices, Capabilities…"
+        style={{
+          width: "100%", boxSizing: "border-box",
+          padding: "5px 28px 5px 10px",
+          border: open ? "1px solid var(--accent)" : "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          background: "var(--bg)", color: "var(--text)",
+          fontSize: "var(--fs-body)", outline: "none",
+        }}
+      />
+      {query && (
+        <button
+          onClick={() => setQuery("")}
+          title="Clear search"
+          aria-label="Clear search"
+          style={{
+            position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+            width: 18, height: 18,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 0, border: "none", background: "transparent",
+            color: "var(--text-tertiary)", cursor: "pointer",
+            borderRadius: "var(--radius-sm)",
+          }}
+        >
+          <X size={10} />
+        </button>
+      )}
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+          width: 400, maxHeight: 420, display: "flex", flexDirection: "column",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+          overflow: "hidden",
+        }}>
+          {/* Header — match count + brief guidance. The guidance line
+              teaches "use slice/capability for specific scope; use
+              feature only when the exact slice is still flexible". */}
+          <div style={{
+            padding: "8px 10px", borderBottom: "1px solid var(--border)",
+            display: "flex", flexDirection: "column", gap: 4,
+          }}>
+            <div style={{
+              fontSize: 10, fontWeight: 600, letterSpacing: 0.4,
+              textTransform: "uppercase", color: "var(--text-tertiary)",
+            }}>
+              Add product scope · {totalShown} match{totalShown === 1 ? "" : "es"}
+            </div>
+            <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", lineHeight: 1.45 }}>
+              Higher-level objects (Capability Area, Feature Set) scope a whole surface — useful before slices are decided. Lower-level objects (Feature Slice, Capability) scope an exact deliverable.
+            </div>
+          </div>
+
+          {/* Body: primary results first; broader levels below an inline
+              separator when the toggle is on. */}
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {primaryTop.length === 0 ? (
+              <div style={{ padding: 12, fontSize: "var(--fs-meta)", color: "var(--text-tertiary)", textAlign: "center" }}>
+                {showBroad && broadTop.length > 0
+                  ? "No features, slices, or capabilities match. Broader levels are below."
+                  : "No matches. Try a shorter query."}
+              </div>
+            ) : (
+              primaryTop.map(renderRow)
+            )}
+            {showBroad && broadTop.length > 0 && (
+              <>
+                <div style={{
+                  padding: "6px 10px",
+                  borderTop: "1px solid var(--border)",
+                  borderBottom: "1px solid var(--border)",
+                  background: "var(--bg-sunken)",
+                  fontSize: 10, fontWeight: 600, letterSpacing: 0.4,
+                  textTransform: "uppercase", color: "var(--text-tertiary)",
+                }}>
+                  Higher-level planning · {broadTop.length}
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", padding: "6px 10px 0", lineHeight: 1.45 }}>
+                  Capability Areas and Feature Sets scope an entire surface. A Must-have Feature Set means "a shippable version of this area" — child slices and capabilities keep their own MoSCoW priorities.
+                </div>
+                {broadTop.map(renderRow)}
+              </>
+            )}
+          </div>
+
+          {/* Footer toggle — "Include broader planning levels" */}
+          <label style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "6px 10px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-sunken)",
+            cursor: "pointer",
+          }}>
+            <input
+              type="checkbox"
+              checked={showBroad}
+              onChange={e => setShowBroad(e.target.checked)}
+            />
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+              Include broader planning levels (Capability Area, Feature Set)
+            </span>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Milestone pickers for the two new product-object kinds ─────────────
+// Kept available even though the unified autosuggest above is now the
+// primary entry point — useful for future surfaces that want a single-
+// kind picker.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function MilestoneAreaPicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+  const { productAreas } = useStore();
+  const options = productAreas.map(a => ({
+    id: a.id, label: a.title, subtitle: a.description,
+  }));
+  return <PickerPopover label="Link capability area" options={options} value={value} onToggle={onToggle} />;
+}
+function MilestoneGroupPicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+  const { featureGroups, productAreas } = useStore();
+  const options = featureGroups.map(g => ({
+    id: g.id, label: g.title,
+    subtitle: productAreas.find(a => a.id === g.areaId)?.title,
+  }));
+  return <PickerPopover label="Link feature set" options={options} value={value} onToggle={onToggle} />;
+}
+
+// ── MoSCoW grouped section + per-row renderer ───────────────────────────
+function moscowSectionStyle(priority: MoscowPriority): React.CSSProperties {
+  const palette: Record<MoscowPriority, { left: string; bg: string }> = {
+    must:   { left: "#15803d",     bg: "rgba(34,197,94,0.05)"  },
+    should: { left: "#1d4ed8",     bg: "rgba(59,130,246,0.05)" },
+    could:  { left: "#b45309",     bg: "rgba(245,158,11,0.05)" },
+    wont:   { left: "var(--text-tertiary)", bg: "var(--bg-sunken)" },
+  };
+  const p = palette[priority];
+  return {
+    borderRadius: "var(--radius)",
+    border: "1px solid var(--border)",
+    borderLeft: `3px solid ${p.left}`,
+    background: p.bg,
+    padding: "8px 10px",
+  };
+}
+
+function MoscowGroup({
+  priority, rows, onChangePriority, onChangeNote,
+}: {
+  priority: MoscowPriority;
+  rows: MilestoneRow[];
+  onChangePriority: (row: MilestoneRow, next: MoscowPriority) => void;
+  onChangeNote:     (row: MilestoneRow, next: string) => void;
+}) {
+  return (
+    <div style={moscowSectionStyle(priority)}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6, marginBottom: rows.length > 0 ? 8 : 0,
+      }}>
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, color: "var(--text)" }}>
+          {MOSCOW_LABEL[priority]}
+        </span>
+        {rows.length > 0 && (
+          <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+            · {rows.length}
+          </span>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", paddingLeft: 2 }}>
+          {priority === "must"   ? "Required for this milestone." :
+           priority === "should" ? "Helpful but not blocking." :
+           priority === "could"  ? "Nice to have if time allows." :
+                                   "Explicitly out of scope."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.map(row => (
+            <MoscowRow
+              key={`${row.kind}:${row.objectId}`}
+              row={row}
+              onChangePriority={(next) => onChangePriority(row, next)}
+              onChangeNote={(next) => onChangeNote(row, next)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function moscowChipStyle(priority: MoscowPriority): React.CSSProperties {
+  const palette: Record<MoscowPriority, { bg: string; fg: string; bd: string }> = {
+    must:   { bg: "rgba(34,197,94,0.12)",  fg: "#15803d", bd: "rgba(34,197,94,0.45)" },
+    should: { bg: "rgba(59,130,246,0.12)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.45)" },
+    could:  { bg: "rgba(245,158,11,0.12)", fg: "#b45309", bd: "rgba(245,158,11,0.45)" },
+    wont:   { bg: "var(--bg-sunken)",      fg: "var(--text-secondary)", bd: "var(--border)" },
+  };
+  const p = palette[priority];
+  return {
+    display: "inline-flex", alignItems: "center", gap: 3,
+    padding: "1px 8px", borderRadius: 100,
+    background: p.bg, color: p.fg,
+    border: `1px solid ${p.bd}`,
+    fontSize: 10, fontWeight: 600, letterSpacing: 0.2,
+    cursor: "pointer", whiteSpace: "nowrap",
+  };
+}
+
+function MoscowRow({
+  row, onChangePriority, onChangeNote,
+}: {
+  row: MilestoneRow;
+  onChangePriority: (next: MoscowPriority) => void;
+  onChangeNote: (next: string) => void;
+}) {
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(row.note ?? "");
+  React.useEffect(() => { setNoteDraft(row.note ?? ""); }, [row.note]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!menuOpen) return;
+    const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [menuOpen]);
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 4,
+      padding: "6px 8px",
+      border: "1px solid var(--border)", borderRadius: "var(--radius)",
+      background: "var(--bg)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={productHitKindPill(row.kind)}>
+          {MILESTONE_OBJECT_KIND_LABEL[row.kind]}
+        </span>
+        {row.onOpen ? (
+          <button
+            onClick={row.onOpen}
+            style={{
+              flex: 1, minWidth: 0, textAlign: "left",
+              background: "transparent", border: "none", padding: 0,
+              fontSize: "var(--fs-body)", color: "var(--text)", cursor: "pointer",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}
+            title={row.title}
+          >
+            {row.title}
+          </button>
+        ) : (
+          <span style={{
+            flex: 1, minWidth: 0, fontSize: "var(--fs-body)", color: "var(--text)",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {row.title}
+          </span>
+        )}
+        {row.parentTitle && (
+          <span style={subtleParentPill()}>{row.parentTitle}</span>
+        )}
+        <div ref={menuRef} style={{ position: "relative" }}>
+          <button onClick={() => setMenuOpen(o => !o)} style={moscowChipStyle(row.priority)}>
+            {MOSCOW_LABEL[row.priority]} <ChevronDown size={9} />
+          </button>
+          {menuOpen && (
+            <div style={{
+              position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+              width: 150, background: "var(--bg)",
+              border: "1px solid var(--border)", borderRadius: "var(--radius-lg)",
+              boxShadow: "var(--shadow-lg)", overflow: "hidden",
+            }}>
+              {(["must", "should", "could", "wont"] as MoscowPriority[]).map(p => (
+                <button
+                  key={p}
+                  onClick={() => { onChangePriority(p); setMenuOpen(false); }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    width: "100%", padding: "6px 10px", textAlign: "left",
+                    background: p === row.priority ? "var(--bg-sunken)" : "transparent",
+                    border: "none", cursor: "pointer",
+                    fontSize: "var(--fs-body)", color: "var(--text)",
+                  }}
+                  onMouseEnter={e => { if (p !== row.priority) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={e => { if (p !== row.priority) e.currentTarget.style.background = "transparent"; }}
+                >
+                  <span style={moscowChipStyle(p)}>{MOSCOW_LABEL[p]}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={row.onUnlink}
+          title="Remove from this milestone"
+          aria-label="Remove from this milestone"
+          style={{
+            padding: 4, color: "var(--text-tertiary)",
+            background: "transparent", border: "none", cursor: "pointer",
+            borderRadius: "var(--radius-sm)",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+        >
+          <X size={10} />
+        </button>
+      </div>
+
+      {(row.linkedGoals.length > 0 || row.note || editingNote) && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 4 }}>
+          {row.linkedGoals.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+                Linked goals
+              </span>
+              {row.linkedGoals.map(g => (
+                <span key={g.id} style={subtleParentPill()} title={g.title}>
+                  {g.title}
+                </span>
+              ))}
+            </div>
+          )}
+          {editingNote ? (
+            <input
+              autoFocus
+              value={noteDraft}
+              onChange={e => setNoteDraft(e.target.value)}
+              onBlur={() => { onChangeNote(noteDraft); setEditingNote(false); }}
+              onKeyDown={e => {
+                if (e.key === "Enter") { onChangeNote(noteDraft); setEditingNote(false); }
+                else if (e.key === "Escape") { setNoteDraft(row.note ?? ""); setEditingNote(false); }
+              }}
+              placeholder="Note for this milestone (optional)…"
+              style={{
+                padding: "3px 6px",
+                border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+                background: "var(--bg)", color: "var(--text)",
+                fontSize: 11, outline: "none",
+              }}
+            />
+          ) : row.note ? (
+            <button
+              onClick={() => setEditingNote(true)}
+              style={{
+                textAlign: "left", padding: "3px 6px",
+                border: "1px solid var(--border)", borderRadius: "var(--radius)",
+                background: "transparent", color: "var(--text-secondary)",
+                fontSize: 11, cursor: "text", lineHeight: 1.45,
+              }}
+              title="Click to edit note"
+            >
+              {row.note}
+            </button>
+          ) : (
+            <button
+              onClick={() => setEditingNote(true)}
+              style={{
+                alignSelf: "flex-start",
+                padding: "1px 4px", fontSize: 10, color: "var(--text-tertiary)",
+                background: "transparent", border: "none", cursor: "pointer",
+              }}
+            >
+              + Add note
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── ProductBrowseTable ──────────────────────────────────────────────────
+// Scan-friendly flat list shown in the "Browse all" view mode. Renders
+// every Feature, Slice, and Capability (Areas and Feature Sets are
+// containers and excluded here — the rail tree is where you scan
+// containers). Each row carries: type chip, title, path, status pill,
+// linked milestone count, and linked weekly-goal count.
+function ProductBrowseTable({
+  areaFilter, statusFilter, releaseFilter, query, typeFilter, onOpen,
+}: {
+  areaFilter: string;
+  statusFilter: "all" | FeatureStatus;
+  releaseFilter: string;
+  query: string;
+  typeFilter: ProductSearchKind;
+  onOpen: (featureId: string, kind: "feature" | "slice" | "capability") => void;
+}) {
+  const {
+    features, featureSlices, productCapabilities, productAreas, featureGroups,
+    releases, weeklyGoals,
+  } = useStore();
+
+  type Row = {
+    kind: "feature" | "slice" | "capability";
+    id: string;
+    title: string;
+    description?: string;
+    pathParts: string[];
+    parentFeatureId: string;
+    status?: FeatureStatus;
+    unassigned: boolean;
+    linkedReleases: { id: string; title: string }[];
+    linkedGoalCount: number;
+  };
+
+  const activeRelease = releases.find(r => r.id === releaseFilter) ?? null;
+
+  const matchesQ = (title: string, desc?: string) => {
+    if (query === "") return true;
+    if (title.toLowerCase().includes(query)) return true;
+    if (desc && desc.toLowerCase().includes(query)) return true;
+    return false;
+  };
+  const matchesAreaForFeature = (areaId: string): boolean => {
+    if (areaFilter === "all") return true;
+    return areaId === areaFilter;
+  };
+
+  const rows: Row[] = useMemo(() => {
+    const out: Row[] = [];
+    // Features
+    if (typeFilter === "all" || typeFilter === "feature" || typeFilter === "unassigned") {
+      features.forEach(f => {
+        if (typeFilter === "unassigned" && f.areaId) return;
+        if (!matchesQ(f.title, f.description)) return;
+        if (statusFilter !== "all" && f.status !== statusFilter) return;
+        if (!matchesAreaForFeature(f.areaId)) return;
+        if (activeRelease && !activeRelease.linkedFeatureIds.includes(f.id)) return;
+        const area = productAreas.find(a => a.id === f.areaId);
+        const set = featureGroups.find(g => g.id === f.featureGroupId);
+        const linkedReleases = releases
+          .filter(r => r.linkedFeatureIds.includes(f.id))
+          .map(r => ({ id: r.id, title: r.title }));
+        const goalCount = weeklyGoals.filter(g => g.linkedFeatureIds.includes(f.id)).length;
+        out.push({
+          kind: "feature", id: f.id, title: f.title, description: f.description,
+          pathParts: [area?.title ?? (f.areaId ? "" : "Unassigned"), set?.title].filter((x): x is string => !!x),
+          parentFeatureId: f.id,
+          status: f.status,
+          unassigned: !f.areaId,
+          linkedReleases,
+          linkedGoalCount: goalCount,
+        });
+      });
+    }
+    // Slices
+    if (typeFilter === "all" || typeFilter === "slice") {
+      featureSlices.forEach(s => {
+        if (!matchesQ(s.title, s.description)) return;
+        if (statusFilter !== "all" && s.status !== statusFilter) return;
+        const parent = features.find(f => f.id === s.featureId);
+        if (!parent) return;
+        if (!matchesAreaForFeature(parent.areaId)) return;
+        if (activeRelease && !activeRelease.linkedSliceIds.includes(s.id)) return;
+        const area = productAreas.find(a => a.id === parent.areaId);
+        const set = featureGroups.find(g => g.id === parent.featureGroupId);
+        const linkedReleases = releases
+          .filter(r => r.linkedSliceIds.includes(s.id))
+          .map(r => ({ id: r.id, title: r.title }));
+        const goalCount = weeklyGoals.filter(g => g.linkedSliceIds.includes(s.id)).length;
+        out.push({
+          kind: "slice", id: s.id, title: s.title, description: s.description,
+          pathParts: [area?.title, set?.title, parent.title].filter((x): x is string => !!x),
+          parentFeatureId: s.featureId,
+          status: s.status,
+          unassigned: !parent.areaId,
+          linkedReleases,
+          linkedGoalCount: goalCount,
+        });
+      });
+    }
+    // Capabilities — no status field; the status filter excludes them.
+    if ((typeFilter === "all" || typeFilter === "capability") && statusFilter === "all") {
+      productCapabilities.forEach(c => {
+        if (!matchesQ(c.title)) return;
+        const parent = features.find(f => f.id === c.featureId);
+        if (!parent) return;
+        if (!matchesAreaForFeature(parent.areaId)) return;
+        if (activeRelease && !activeRelease.linkedCapabilityIds.includes(c.id)) return;
+        const area = productAreas.find(a => a.id === parent.areaId);
+        const set = featureGroups.find(g => g.id === parent.featureGroupId);
+        const linkedReleases = releases
+          .filter(r => r.linkedCapabilityIds.includes(c.id))
+          .map(r => ({ id: r.id, title: r.title }));
+        const goalCount = weeklyGoals.filter(g => g.linkedCapabilityIds.includes(c.id)).length;
+        out.push({
+          kind: "capability", id: c.id, title: c.title,
+          pathParts: [area?.title, set?.title, parent.title].filter((x): x is string => !!x),
+          parentFeatureId: c.featureId,
+          unassigned: !parent.areaId,
+          linkedReleases,
+          linkedGoalCount: goalCount,
+        });
+      });
+    }
+    const order: Record<Row["kind"], number> = { feature: 0, slice: 1, capability: 2 };
+    out.sort((a, b) => {
+      const d = order[a.kind] - order[b.kind];
+      if (d !== 0) return d;
+      return a.title.localeCompare(b.title);
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [features, featureSlices, productCapabilities, productAreas, featureGroups, releases, weeklyGoals,
+       areaFilter, statusFilter, releaseFilter, query, typeFilter, activeRelease]);
+
+  return (
+    <div style={{ padding: "12px 24px 24px", display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+        textTransform: "uppercase", color: "var(--text-tertiary)",
+        padding: "0 2px 4px",
+        borderBottom: "1px solid var(--border)",
+      }}>
+        <span style={{ width: 80 }}>Type</span>
+        <span style={{ flex: 1 }}>Title · Path</span>
+        <span style={{ width: 110, textAlign: "left" }}>Status</span>
+        <span style={{ width: 160 }}>Milestone</span>
+        <span style={{ width: 70, textAlign: "right" }}>Goals</span>
+      </div>
+      {rows.length === 0 ? (
+        <div style={{
+          margin: "40px auto", maxWidth: 380, textAlign: "center",
+          fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.55,
+        }}>
+          Nothing matches the current filters. Clear them in the left rail or refine the search.
+        </div>
+      ) : (
+        rows.map(row => (
+          <button
+            key={`${row.kind}:${row.id}`}
+            onClick={() => onOpen(row.parentFeatureId, row.kind)}
+            style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 2px",
+              borderBottom: "1px solid var(--border)",
+              background: "transparent", border: "none",
+              textAlign: "left", cursor: "pointer",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            title={row.description ? `${row.title} — ${row.description}` : row.title}
+          >
+            <span style={{ width: 80 }}>
+              <span style={productHitKindPill(row.kind)}>{productHitKindLabel(row.kind)}</span>
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{
+                  fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {row.title}
+                </span>
+                {row.unassigned && row.kind === "feature" && (
+                  <span style={{
+                    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                    color: "#b45309",
+                    background: "rgba(245,158,11,0.12)",
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    borderRadius: 100, padding: "0 6px",
+                  }}>
+                    UNASSIGNED
+                  </span>
+                )}
+              </div>
+              {row.pathParts.length > 0 && (
+                <div style={{
+                  fontSize: 10.5, color: "var(--text-tertiary)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  marginTop: 1,
+                }}>
+                  Path: {row.pathParts.join(" / ")}
+                </div>
+              )}
+            </div>
+            <span style={{ width: 110 }}>
+              {row.status ? (
+                <span style={pillStyle(row.status)}>{FEATURE_STATUS_LABEL[row.status]}</span>
+              ) : (
+                <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>—</span>
+              )}
+            </span>
+            <span style={{ width: 160, fontSize: 11, color: "var(--text-secondary)" }}>
+              {row.linkedReleases.length === 0 ? (
+                <span style={{ color: "var(--text-tertiary)" }}>—</span>
+              ) : (
+                <span style={{
+                  display: "inline-block", maxWidth: 156,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }} title={row.linkedReleases.map(r => r.title).join(", ")}>
+                  {row.linkedReleases[0].title}
+                  {row.linkedReleases.length > 1 && (
+                    <span style={{ color: "var(--text-tertiary)" }}>
+                      {" +"}{row.linkedReleases.length - 1}
+                    </span>
+                  )}
+                </span>
+              )}
+            </span>
+            <span style={{ width: 70, textAlign: "right", fontSize: 11, color: row.linkedGoalCount > 0 ? "var(--text-secondary)" : "var(--text-tertiary)" }}>
+              {row.linkedGoalCount > 0 ? `${row.linkedGoalCount} goal${row.linkedGoalCount === 1 ? "" : "s"}` : "—"}
+            </span>
+          </button>
+        ))
       )}
     </div>
   );

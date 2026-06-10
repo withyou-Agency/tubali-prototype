@@ -2710,11 +2710,85 @@ function LinkedSignalRow({ sig, onOpen }: { sig: Signal; onOpen: () => void }) {
 // ── WipPage ────────────────────────────────────────────────────────────────
 type BacklogFilter = "all" | "task" | "intent";
 
+// ── DraftIntentRailCard ───────────────────────────────────────────────
+// Compact card used in the WIP backlog rail when the draft-visibility
+// filter surfaces draft intents. Visually distinct from a real WipCard
+// (purple "DRAFT" pill + dashed border) so users never confuse a draft
+// with a real intent. Click routes to the parent group workspace.
+function DraftIntentRailCard({
+  title, signalCount, groupName, updatedAt, onOpen,
+}: {
+  title: string;
+  signalCount: number;
+  groupName?: string;
+  updatedAt: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      onClick={onOpen}
+      title="Draft intent — click to open its parent group workspace"
+      style={{
+        display: "flex", flexDirection: "column", gap: 4,
+        width: "100%", textAlign: "left",
+        marginBottom: 6, padding: "8px 10px",
+        background: "rgba(168,85,247,0.04)",
+        border: "1px dashed rgba(168,85,247,0.45)",
+        borderRadius: "var(--radius)",
+        cursor: "pointer",
+      }}
+      onMouseEnter={e => (e.currentTarget.style.background = "rgba(168,85,247,0.09)")}
+      onMouseLeave={e => (e.currentTarget.style.background = "rgba(168,85,247,0.04)")}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+          color: "#7e22ce",
+          background: "rgba(168,85,247,0.12)",
+          border: "1px solid rgba(168,85,247,0.40)",
+          borderRadius: 100, padding: "0 6px",
+          whiteSpace: "nowrap",
+        }}>
+          DRAFT
+        </span>
+        <span style={{ fontSize: 10, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+          {signalCount} signal{signalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div style={{
+        fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
+        lineHeight: 1.35,
+        overflow: "hidden", textOverflow: "ellipsis",
+        display: "-webkit-box", WebkitLineClamp: 2 as unknown as number, WebkitBoxOrient: "vertical" as const,
+      }}>
+        {title}
+      </div>
+      {groupName && (
+        <div style={{
+          fontSize: 10.5, color: "var(--text-tertiary)",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          in {groupName} · updated {relTime(updatedAt)}
+        </div>
+      )}
+    </button>
+  );
+}
+
 export function WipPage() {
-  const { wipItems, sprints, newSprint, openWip, moveWip, selectedWipId, appMode, wipEvents, clientPreviousVisitAt } = useStore();
+  const { wipItems, sprints, newSprint, openWip, moveWip, selectedWipId, appMode, wipEvents, clientPreviousVisitAt, draftIntents, signalGroups, openGroup, setRoute } = useStore();
   const readOnly = appMode === "client";
   const [backlogOver, setBacklogOver] = useState(false);
   const [backlogFilter, setBacklogFilter] = useState<BacklogFilter>("all");
+  // Draft intents are planning-only records — by default they stay
+  // hidden in WIP so the backlog reads as "work the team is ready to
+  // pick up." Three-state visibility per the spec:
+  //   • "hide"  — drafts excluded (default)
+  //   • "show"  — drafts appear alongside intents/tasks in the backlog
+  //   • "only"  — drafts exclusively (intents + tasks hidden in the rail)
+  // Drafts always remain referenced by their parent group regardless
+  // of this filter; we're just toggling visibility in the WIP rail.
+  const [draftVisibility, setDraftVisibility] = useState<"hide" | "show" | "only">("hide");
   const [whatChangedOpen, setWhatChangedOpen] = useState(false);
   const [showChangesOnly, setShowChangesOnly] = useState(false);
 
@@ -2749,7 +2823,7 @@ export function WipPage() {
   // every cross-sprint surface in this layout: card badges, sprint badges,
   // backlog badge, and the "Show changes" filter.
   const freshIds = useMemo(() => freshWipIdSet(wipEvents, sinceISO), [wipEvents, sinceISO]);
-  const backlogItems = (showChangesOnly
+  const backlogWipItems = (showChangesOnly
     ? typeFilteredBacklog.filter(w => freshIds.has(w.id))
     : typeFilteredBacklog
   ).slice().sort((a, b) => {
@@ -2759,6 +2833,14 @@ export function WipPage() {
     const bo = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
     return ao - bo;
   });
+  // Drafts (planning-only records) live in their own bucket so they
+  // can be toggled in/out of the backlog rail. We always render the
+  // count so the user can see how many drafts exist even when hidden.
+  const allDrafts = draftIntents.filter(d => !d.finalizedWipId);
+  const visibleDrafts = draftVisibility === "hide" ? [] : allDrafts;
+  // Backlog items projection — drops non-drafts when the filter is
+  // "only", keeps them otherwise.
+  const backlogItems = draftVisibility === "only" ? [] : backlogWipItems;
   const backlogFreshCount = allBacklogItems.reduce(
     (n, w) => (freshIds.has(w.id) ? n + 1 : n), 0,
   );
@@ -2836,10 +2918,68 @@ export function WipPage() {
               );
             })}
           </div>
+          {/* Draft visibility — three-position toggle so the user can
+              decide whether planning-only drafts surface here or stay
+              in their parent groups. Count badge shows how many drafts
+              exist regardless of the active mode. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 6 }}>
+            <span style={{ fontSize: 10, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+              Drafts ({allDrafts.length})
+            </span>
+            {(["hide", "show", "only"] as const).map(v => {
+              const active = draftVisibility === v;
+              const label = v === "hide" ? "Hide" : v === "show" ? "Show" : "Only";
+              return (
+                <button
+                  key={v}
+                  onClick={() => setDraftVisibility(v)}
+                  title={v === "hide"
+                    ? "Hide drafts from this rail (they remain in their groups)"
+                    : v === "show"
+                      ? "Show drafts alongside intents and tasks"
+                      : "Show only drafts — intents and tasks hidden in this rail"}
+                  style={{
+                    display: "inline-flex", alignItems: "center",
+                    padding: "1px 8px", borderRadius: 100,
+                    fontSize: 10.5, fontWeight: 500,
+                    background: active ? "rgba(168,85,247,0.10)" : "transparent",
+                    color: active ? "#7e22ce" : "var(--text-tertiary)",
+                    border: active ? "1px solid rgba(168,85,247,0.35)" : "1px solid transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
           {backlogItems.map(w => <WipCard key={w.id} wip={w} onClick={() => openWip(w.id)} />)}
-          {backlogItems.length === 0 && (
+          {/* Draft intents — projected into the rail when visibility
+              allows. Clicking a draft jumps to its parent group's
+              workspace where the draft can be edited / finalized. */}
+          {visibleDrafts.map(d => {
+            const parent = signalGroups.find(g => g.id === d.groupId);
+            return (
+              <DraftIntentRailCard
+                key={d.id}
+                title={d.title}
+                signalCount={d.signalIds.length}
+                groupName={parent?.name}
+                updatedAt={d.updatedAt}
+                onOpen={() => {
+                  // Drafts live inside groups; clicking the rail card
+                  // routes to the parent group's workspace.
+                  if (parent) {
+                    setRoute("signals");
+                    openGroup(parent.id);
+                  }
+                }}
+              />
+            );
+          })}
+          {backlogItems.length === 0 && visibleDrafts.length === 0 && (
             <div style={{
               margin: "12px 0", padding: "20px", textAlign: "center",
               fontSize: "var(--fs-meta)", color: "var(--text-disabled)",
