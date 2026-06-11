@@ -296,6 +296,22 @@ function WipCard({ wip, onClick }: { wip: Wip; onClick: () => void }) {
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
         <TypeChip type={wip.type} />
+        {wip.isDraft && (
+          <span
+            title="Draft intent — captured during planning, not yet finalized"
+            style={{
+              display: "inline-flex", alignItems: "center",
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+              color: "#7e22ce",
+              background: "rgba(168,85,247,0.12)",
+              border: "1px solid rgba(168,85,247,0.40)",
+              borderRadius: 100, padding: "0 6px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            DRAFT
+          </span>
+        )}
         <span className="mono" style={{ fontSize: 10, color: "var(--text-tertiary)", marginLeft: "auto" }}>{wip.id}</span>
       </div>
       <div style={{
@@ -2833,14 +2849,24 @@ export function WipPage() {
     const bo = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
     return ao - bo;
   });
-  // Drafts (planning-only records) live in their own bucket so they
-  // can be toggled in/out of the backlog rail. We always render the
-  // count so the user can see how many drafts exist even when hidden.
+  // Drafts come from two sources:
+  //   1. DraftIntent records (planning-only inside group workspaces).
+  //   2. Wip rows with isDraft=true (lightweight drafts created from
+  //      Weekly Goals — they ARE Wip items, just flagged as drafts).
+  // The visibility filter governs both consistently.
   const allDrafts = draftIntents.filter(d => !d.finalizedWipId);
+  const draftWips = backlogWipItems.filter(w => w.isDraft);
+  const totalDraftCount = allDrafts.length + draftWips.length;
   const visibleDrafts = draftVisibility === "hide" ? [] : allDrafts;
-  // Backlog items projection — drops non-drafts when the filter is
-  // "only", keeps them otherwise.
-  const backlogItems = draftVisibility === "only" ? [] : backlogWipItems;
+  // Backlog Wip projection:
+  //   • "hide"  → drop isDraft wips so the rail is clean.
+  //   • "show"  → keep everything including isDraft wips.
+  //   • "only"  → restrict to isDraft wips (non-draft items hidden).
+  const backlogItems = draftVisibility === "hide"
+    ? backlogWipItems.filter(w => !w.isDraft)
+    : draftVisibility === "only"
+      ? draftWips
+      : backlogWipItems;
   const backlogFreshCount = allBacklogItems.reduce(
     (n, w) => (freshIds.has(w.id) ? n + 1 : n), 0,
   );
@@ -2924,7 +2950,7 @@ export function WipPage() {
               exist regardless of the active mode. */}
           <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 6 }}>
             <span style={{ fontSize: 10, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
-              Drafts ({allDrafts.length})
+              Drafts ({totalDraftCount})
             </span>
             {(["hide", "show", "only"] as const).map(v => {
               const active = draftVisibility === v;

@@ -1783,6 +1783,7 @@ function SelectionBar() {
     signalGroupFilter, signalGroups, removeSignalsFromGroup,
     markSignalsAsDuplicatesOf, closeSignalAsDuplicateOf, linkSignalToWip, wipItems,
     createDraftIntent, finalizeDraftIntent, linkGroupToExistingIntent,
+    createGroupDraftIntent, finalizeWipDraft,
   } = useStore();
   const [showCreateDraft, setShowCreateDraft] = useState(false);
   // Bulk-split queue — array of signalIds the user wants to split, in
@@ -2228,26 +2229,26 @@ function SelectionBar() {
             initialSignalIds={inGroupSelection}
             onClose={() => setShowCreateDraft(false)}
             onCreate={(input, andFinalize) => {
-              const draftId = createDraftIntent({
+              // Draft intent = normal intent with status Draft. We
+              // mint a Wip directly (isDraft:true) instead of the
+              // legacy DraftIntent record. The wip carries every
+              // planning field, links back to the group + signals
+              // via the standard relationships, and respects the
+              // WIP rail's draft visibility filter.
+              const wipId = createGroupDraftIntent({
                 groupId: activeGroup.id,
                 title: input.title,
                 description: input.description,
                 signalIds: input.signalIds,
                 notes: input.notes,
-                suggestedTasks: input.suggestedTasks,
                 acceptanceCriteria: input.acceptanceCriteria,
                 context: input.context,
                 decisionRationale: input.decisionRationale,
                 rejectedAlternatives: input.rejectedAlternatives,
                 plan: input.plan,
               });
-              if (andFinalize && draftId) {
-                // Save-and-finalize path: mint the real intent right
-                // after the draft so the user gets a non-draft wip on
-                // the Kanban without an extra trip through the group
-                // workspace. The draft row is preserved + stamped
-                // with finalizedWipId so lineage stays intact.
-                finalizeDraftIntent(draftId);
+              if (andFinalize && wipId) {
+                finalizeWipDraft(wipId);
               }
               clearSelection();
               setShowCreateDraft(false);
@@ -3111,22 +3112,25 @@ function SignalGroupWorkspaceBanner({ groupId }: { groupId: string }) {
 //     to (either by finalizing a draft, or by explicitly linking to an
 //     existing intent). Clicking a row opens the Wip in its modal.
 function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
-  const { draftIntents, wipItems, deleteDraftIntent, finalizeDraftIntent, openWip, setRoute } = useStore();
-  const drafts   = draftIntents.filter(d => d.groupId === group.id && !d.finalizedWipId);
-  const finalized = draftIntents
-    .filter(d => d.groupId === group.id && !!d.finalizedWipId)
-    .map(d => ({ draft: d, wip: wipItems.find(w => w.id === d.finalizedWipId!) }))
-    .filter((x): x is { draft: DraftIntent; wip: import("@/lib/data").Wip } => !!x.wip);
-  const linkedWithoutDraft = group.linkedIntentIds
-    .filter(id => !finalized.some(f => f.wip.id === id))
-    .map(id => wipItems.find(w => w.id === id))
-    .filter((w): w is import("@/lib/data").Wip => !!w);
+  const { draftIntents, wipItems, deleteDraftIntent, finalizeDraftIntent, finalizeWipDraft, openWip, setRoute } = useStore();
+  // Related intents — every Wip referenced by this group, draft or
+  // finalized. The single source of truth is group.linkedIntentIds;
+  // we read each id through to the Wip pool. Draft = Wip.isDraft.
+  const relatedIntents = useMemo(
+    () => group.linkedIntentIds
+      .map(id => wipItems.find(w => w.id === id))
+      .filter((w): w is import("@/lib/data").Wip => !!w),
+    [group.linkedIntentIds, wipItems],
+  );
+  // Legacy DraftIntent records — kept for backward compat with seed
+  // data + groups created before drafts became real Wips. New drafts
+  // now go through createGroupDraftIntent + Wip.isDraft.
+  const legacyDrafts = draftIntents.filter(d => d.groupId === group.id && !d.finalizedWipId);
 
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
 
-  // Don't render the block at all if there's nothing to show — keeps the
-  // workspace banner compact for groups in their early review phase.
-  if (drafts.length === 0 && finalized.length === 0 && linkedWithoutDraft.length === 0) {
+  // Don't render the block at all if there's nothing to show.
+  if (relatedIntents.length === 0 && legacyDrafts.length === 0) {
     return null;
   }
 
@@ -3137,16 +3141,103 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
 
   return (
     <>
-      {drafts.length > 0 && (
+      {relatedIntents.length > 0 && (
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-            Draft intents · {drafts.length}
+            Related intents · {relatedIntents.length}
             <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, marginLeft: 6 }}>
-              · planning-only; not on the Kanban yet
+              · drafts and finalized intents linked to this group
             </span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {drafts.map(d => (
+            {relatedIntents.map(wip => {
+              const isDraft = !!wip.isDraft;
+              return (
+                <div
+                  key={wip.id}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "6px 10px",
+                    border: isDraft ? "1px dashed rgba(168,85,247,0.45)" : "1px solid var(--border)",
+                    borderRadius: "var(--radius)",
+                    background: isDraft ? "rgba(168,85,247,0.04)" : "var(--bg)",
+                  }}
+                >
+                  {isDraft ? (
+                    <span style={{
+                      fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                      color: "#7e22ce",
+                      background: "rgba(168,85,247,0.12)",
+                      border: "1px solid rgba(168,85,247,0.40)",
+                      borderRadius: 100, padding: "1px 7px",
+                      whiteSpace: "nowrap",
+                    }}>DRAFT</span>
+                  ) : (
+                    <span style={intentBadgeStyle()}>INTENT</span>
+                  )}
+                  <button
+                    onClick={() => openIntent(wip.id)}
+                    style={{
+                      flex: 1, minWidth: 0, textAlign: "left",
+                      background: "transparent", border: "none", padding: 0,
+                      cursor: "pointer",
+                    }}
+                    title="Open this intent in WIP"
+                  >
+                    <div style={{
+                      fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {wip.title}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                      {wip.linkedSignals.length} signal{wip.linkedSignals.length === 1 ? "" : "s"}
+                      {" · "}{isDraft ? "Status: Draft" : `Status: ${columnLabelFor(wip.column)}`}
+                      {" · Created from this group"}
+                    </div>
+                  </button>
+                  {isDraft && (
+                    <button
+                      onClick={() => {
+                        if (!window.confirm(`Finalize draft "${wip.title}"? Status flips from Draft to a normal intent; linked signals and group reference stay attached.`)) return;
+                        finalizeWipDraft(wip.id);
+                      }}
+                      title="Promote this draft to a real intent (clears the Draft status)"
+                      style={{
+                        padding: "3px 10px", borderRadius: "var(--radius)",
+                        background: "var(--accent)", color: "white",
+                        border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                      }}
+                    >
+                      Finalize
+                    </button>
+                  )}
+                  <span style={isDraft ? {
+                    fontSize: 10, fontWeight: 600,
+                    color: "#7e22ce",
+                    background: "rgba(168,85,247,0.10)",
+                    border: "1px solid rgba(168,85,247,0.40)",
+                    borderRadius: 100, padding: "1px 8px",
+                  } : columnPillStyle(wip.column)}>
+                    {isDraft ? "Draft" : columnLabelFor(wip.column)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {legacyDrafts.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
+            Legacy draft records · {legacyDrafts.length}
+            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, marginLeft: 6 }}>
+              · pre-Wip-draft planning rows
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {legacyDrafts.map(d => (
               <div key={d.id} style={{
                 display: "flex", alignItems: "center", gap: 8,
                 padding: "6px 10px",
@@ -3161,9 +3252,7 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
                   border: "1px solid var(--border)",
                   borderRadius: 100, padding: "1px 7px",
                   whiteSpace: "nowrap",
-                }}>
-                  DRAFT
-                </span>
+                }}>LEGACY DRAFT</span>
                 <button
                   onClick={() => setEditingDraftId(d.id)}
                   style={{
@@ -3171,30 +3260,14 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
                     background: "transparent", border: "none", padding: 0,
                     cursor: "pointer",
                   }}
-                  title="Edit this draft"
                 >
                   <div style={{
                     fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {d.title}
-                  </div>
+                  }}>{d.title}</div>
                   <div style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
                     {d.signalIds.length} signal{d.signalIds.length === 1 ? "" : "s"}
-                    {d.suggestedTasks.length > 0 && <> · {d.suggestedTasks.length} suggested task{d.suggestedTasks.length === 1 ? "" : "s"}</>}
                   </div>
-                </button>
-                <button
-                  onClick={() => setEditingDraftId(d.id)}
-                  style={{
-                    padding: "3px 10px", borderRadius: "var(--radius)",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    color: "var(--text-secondary)",
-                    fontSize: 11, cursor: "pointer",
-                  }}
-                >
-                  Edit
                 </button>
                 <button
                   onClick={() => {
@@ -3202,15 +3275,10 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
                       window.alert("Add at least one linked signal before finalizing the draft.");
                       return;
                     }
-                    if (!window.confirm(`Finalize draft "${d.title}" into a real intent? It will appear on the Kanban under To do.`)) return;
+                    if (!window.confirm(`Finalize legacy draft "${d.title}" into a Wip intent?`)) return;
                     const newId = finalizeDraftIntent(d.id);
-                    if (newId) {
-                      // Optional: jump straight to the new intent so the
-                      // user can keep editing in the WIP modal.
-                      openIntent(newId);
-                    }
+                    if (newId) openIntent(newId);
                   }}
-                  title="Promote this draft to a real intent on the Kanban"
                   style={{
                     padding: "3px 10px", borderRadius: "var(--radius)",
                     background: "var(--accent)", color: "white",
@@ -3221,12 +3289,9 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
                 </button>
                 <button
                   onClick={() => {
-                    if (window.confirm(`Delete draft "${d.title}"? Signals stay; only the draft record is removed.`)) {
-                      deleteDraftIntent(d.id);
-                    }
+                    if (window.confirm(`Delete legacy draft "${d.title}"? Signals stay.`)) deleteDraftIntent(d.id);
                   }}
-                  aria-label="Delete draft"
-                  title="Delete this draft"
+                  aria-label="Delete legacy draft"
                   style={{
                     padding: 4, color: "var(--text-tertiary)",
                     background: "transparent", border: "none", cursor: "pointer",
@@ -3235,67 +3300,6 @@ function GroupWorkspaceIntentsBlock({ group }: { group: SignalGroup }) {
                 >
                   <X size={10} />
                 </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {(finalized.length > 0 || linkedWithoutDraft.length > 0) && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-            Linked finalized intents · {finalized.length + linkedWithoutDraft.length}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {finalized.map(({ draft, wip }) => (
-              <div key={draft.id} style={intentRowStyle()}>
-                <span style={intentBadgeStyle()}>INTENT</span>
-                <button
-                  onClick={() => openIntent(wip.id)}
-                  style={{
-                    flex: 1, minWidth: 0, textAlign: "left",
-                    background: "transparent", border: "none", padding: 0,
-                    cursor: "pointer",
-                  }}
-                  title="Open the intent on the Kanban"
-                >
-                  <div style={{
-                    fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {wip.title}
-                  </div>
-                  <div style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
-                    {wip.linkedSignals.length} signal{wip.linkedSignals.length === 1 ? "" : "s"} · {columnLabelFor(wip.column)}
-                    {" "}· from draft &ldquo;{draft.title}&rdquo;
-                  </div>
-                </button>
-                <span style={columnPillStyle(wip.column)}>{columnLabelFor(wip.column)}</span>
-              </div>
-            ))}
-            {linkedWithoutDraft.map(wip => (
-              <div key={wip.id} style={intentRowStyle()}>
-                <span style={intentBadgeStyle()}>INTENT</span>
-                <button
-                  onClick={() => openIntent(wip.id)}
-                  style={{
-                    flex: 1, minWidth: 0, textAlign: "left",
-                    background: "transparent", border: "none", padding: 0,
-                    cursor: "pointer",
-                  }}
-                  title="Open the intent on the Kanban"
-                >
-                  <div style={{
-                    fontSize: "var(--fs-body)", fontWeight: 500, color: "var(--text)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {wip.title}
-                  </div>
-                  <div style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
-                    {wip.linkedSignals.length} signal{wip.linkedSignals.length === 1 ? "" : "s"} · linked from group
-                  </div>
-                </button>
-                <span style={columnPillStyle(wip.column)}>{columnLabelFor(wip.column)}</span>
               </div>
             ))}
           </div>
@@ -6487,6 +6491,9 @@ function SignalGroupsListView() {
   // Drives the unified "New group" modal — combines manual signal
   // picking with AI suggestions in one flow.
   const [newGroupOpen, setNewGroupOpen] = useState(false);
+  // Drives the "Prepare multiple groups" workspace — lets the user
+  // draft several groups in one sitting (typical pre-meeting flow).
+  const [prepareGroupsOpen, setPrepareGroupsOpen] = useState(false);
 
   // Sort: in-review / open first, archived last; within each bucket,
   // most-recently-updated first so active groups float to the top.
@@ -6513,6 +6520,25 @@ function SignalGroupsListView() {
     });
     setNewGroupOpen(false);
     openGroup(id);
+  };
+  // Bulk create from the Prepare-groups workspace. We create each
+  // draft as a real group and leave the user on the list view so they
+  // can scan everything that just landed — opening one would hide the
+  // others. Single-draft case is the only exception: jumping into the
+  // workspace makes more sense when there's only one new group.
+  const handleConfirmCreateMany = (drafts: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }[]) => {
+    let firstId: string | null = null;
+    for (const d of drafts) {
+      const id = createSignalGroup({
+        name: d.name,
+        notes: d.notes,
+        reasons: d.reasons,
+        signalIds: d.signalIds,
+      });
+      if (firstId === null) firstId = id;
+    }
+    setPrepareGroupsOpen(false);
+    if (drafts.length === 1 && firstId) openGroup(firstId);
   };
 
   return (
@@ -6558,20 +6584,38 @@ function SignalGroupsListView() {
         </span>
         <span style={{ flex: 1 }} />
         {!readOnly && (
-          <button
-            onClick={() => setNewGroupOpen(true)}
-            title="Define a new group — pick signals manually or use AI suggestions"
-            style={{
-              padding: "5px 12px",
-              background: "var(--accent)",
-              color: "white",
-              border: "none", borderRadius: "var(--radius)",
-              fontSize: "var(--fs-meta)", fontWeight: 600,
-              cursor: "pointer", whiteSpace: "nowrap",
-            }}
-          >
-            + New group
-          </button>
+          <>
+            <button
+              onClick={() => setPrepareGroupsOpen(true)}
+              title="Draft several groups at once — typical before a review meeting. Run AI per group, review, then create them all."
+              style={{
+                padding: "5px 12px",
+                background: "var(--bg)",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)", borderRadius: "var(--radius)",
+                fontSize: "var(--fs-meta)", fontWeight: 500,
+                cursor: "pointer", whiteSpace: "nowrap",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "var(--bg)")}
+            >
+              ✦ Prepare groups
+            </button>
+            <button
+              onClick={() => setNewGroupOpen(true)}
+              title="Define a new group — pick signals manually or use AI suggestions"
+              style={{
+                padding: "5px 12px",
+                background: "var(--accent)",
+                color: "white",
+                border: "none", borderRadius: "var(--radius)",
+                fontSize: "var(--fs-meta)", fontWeight: 600,
+                cursor: "pointer", whiteSpace: "nowrap",
+              }}
+            >
+              + New group
+            </button>
+          </>
         )}
       </div>
 
@@ -6614,6 +6658,12 @@ function SignalGroupsListView() {
         <NewGroupModal
           onClose={() => setNewGroupOpen(false)}
           onConfirm={handleConfirmCreate}
+        />
+      )}
+      {prepareGroupsOpen && (
+        <PrepareGroupsModal
+          onClose={() => setPrepareGroupsOpen(false)}
+          onCreate={handleConfirmCreateMany}
         />
       )}
     </div>
@@ -7196,7 +7246,7 @@ function NewGroupModalImpl({
   onClose: () => void;
   onConfirm: (input: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }) => void;
 }) {
-  const { signals, signalGroups, signalAttachments } = useStore();
+  const { signals, signalGroups, signalAttachments, wipItems, openSignal } = useStore();
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [reasons, setReasons] = useState<SignalGroupReason[]>([]);
@@ -7204,14 +7254,21 @@ function NewGroupModalImpl({
   const [selectedSignalIds, setSelectedSignalIds] = useState<Set<string>>(new Set());
   const [pickQuery, setPickQuery] = useState("");
   const [density, setDensity] = useState<"comfortable" | "compact" | "grid">("comfortable");
-  // Which AI cluster (if any) is expanded — only one at a time so
-  // the modal doesn't get tall.
-  const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
-  // Single source-of-adds toggle — instead of having both panels open
-  // at once (which crowded the modal), the user picks one mode at a
-  // time. "browse" is the default since AI suggestions already weave
-  // into the browse list via the AI SUGGESTED pill.
-  const [addSource, setAddSource] = useState<"browse" | "ideas">("browse");
+  const [browseOpen, setBrowseOpenLocal] = useState(false);
+  // ── AI find-relevant-signals state ──────────────────────────────────
+  //   "idle"    — user hasn't asked AI yet; the find-button is the CTA.
+  //   "loading" — short artificial delay so the button reads as a real
+  //               AI action, not an instant local filter.
+  //   "ready"   — suggestions computed. State stays ready until the
+  //               user changes context / selection enough to stale it.
+  const [aiState, setAiState] = useState<"idle" | "loading" | "ready">("idle");
+  // Snapshot of the inputs used the last time the user ran "Find
+  // relevant signals". When the current inputs differ, we show a
+  // small "context changed — refresh suggestions" hint.
+  const [aiSnapshot, setAiSnapshot] = useState<{ notes: string; reasons: string[]; selectedCount: number } | null>(null);
+  // Session-local dismissed set — used so "Dismiss" hides a suggestion
+  // without affecting any persisted data. Cleared on Refresh.
+  const [dismissedSignalIds, setDismissedSignalIds] = useState<Set<string>>(new Set());
 
   const canConfirm = name.trim().length > 0;
   const toggleReason = (r: SignalGroupReason) =>
@@ -7244,130 +7301,40 @@ function NewGroupModalImpl({
     }).slice(0, 100);
   }, [signals, pickQuery]);
 
-  // ── AI suggestions: cluster the ungrouped signal pool with simple
-  // lexical heuristics + source / staleness buckets. Same logic the
-  // previous SuggestGroupsModal used; folded in here so both flows
-  // live in one place.
-  const ungroupedSignals = useMemo(() => {
-    const inAnyGroup = new Set<string>();
-    signalGroups.forEach(g => g.signalIds.forEach(id => inAnyGroup.add(id)));
-    return signals.filter(s => !inAnyGroup.has(s.id));
-  }, [signals, signalGroups]);
+  // ── AI candidate pool ─────────────────────────────────────────────
+  // EVERY signal not already in this group's staging set is a
+  // candidate. Multi-group membership is allowed, so we do NOT
+  // exclude signals that belong to other groups — the AI scores
+  // against context only.
+  const ungroupedSignals = useMemo(() => signals, [signals]);
 
-  type Suggestion = {
-    id: string;
-    name: string;
-    notes: string;
-    why: string;                         // human-readable explanation
-    confidence: "high" | "medium" | "low";
-    reasons: SignalGroupReason[];
-    signalIds: string[];
-  };
-  // Confidence helper — pure heuristic on cluster size.
-  const confFromSize = (n: number): "high" | "medium" | "low" =>
-    n >= 6 ? "high" : n >= 4 ? "medium" : "low";
-  const suggestions: Suggestion[] = useMemo(() => {
-    const out: Suggestion[] = [];
-    const STOP = new Set(["the","and","with","that","this","from","into","when","where","what","have","been","were","over","under","need","needs","also","just","very","more","less","like","make","made","please","still","again","while","about","cannot","doesnt","doesn","could","would","should","since","there","their","than","then","these","those","such","each","other","onto","upon","does","done","much","most","some","only","seem","seems"]);
-    const wordCount = new Map<string, Set<string>>();
-    for (const s of ungroupedSignals) {
-      const text = (s.title + " " + (s.description ?? "")).toLowerCase();
-      const tokens = text.match(/[a-z]{4,}/g) ?? [];
-      const seen = new Set<string>();
-      for (const t of tokens) {
-        if (STOP.has(t)) continue;
-        if (seen.has(t)) continue;
-        seen.add(t);
-        const arr = wordCount.get(t) ?? new Set<string>();
-        arr.add(s.id);
-        wordCount.set(t, arr);
-      }
-    }
-    const candidates = Array.from(wordCount.entries())
-      .filter(([_, ids]) => ids.size >= 3)
-      .sort((a, b) => b[1].size - a[1].size)
-      .slice(0, 5);
-    for (const [word, idSet] of candidates) {
-      const cap = word.charAt(0).toUpperCase() + word.slice(1);
-      out.push({
-        id: `kw-${word}`,
-        name: `${cap}-related feedback`,
-        notes: `Signals mentioning "${word}" that aren't yet in any group.`,
-        why: `${idSet.size} ungrouped signals share the keyword “${word}” in their title or description.`,
-        confidence: confFromSize(idSet.size),
-        reasons: ["same_theme"],
-        signalIds: Array.from(idSet).slice(0, 12),
-      });
-    }
-    const feedbackUnread = ungroupedSignals.filter(s => s.source === "feedback" && s.status === "new");
-    if (feedbackUnread.length >= 3) {
-      out.push({
-        id: "feedback-unread",
-        name: "Unread feedback signals",
-        notes: "Ungrouped feedback that hasn't been triaged yet.",
-        why: `${feedbackUnread.length} feedback signals are still new and not in any group — worth a triage sweep.`,
-        confidence: confFromSize(feedbackUnread.length),
-        reasons: ["other"],
-        signalIds: feedbackUnread.map(s => s.id).slice(0, 20),
-      });
-    }
-    const stale = ungroupedSignals.filter(s => {
-      if (s.status !== "new") return false;
-      const ageDays = (Date.now() - new Date(s.createdAt).getTime()) / 86_400_000;
-      return ageDays > 14;
-    });
-    if (stale.length >= 3) {
-      out.push({
-        id: "stale",
-        name: "Stale signals to review",
-        notes: "Signals over 2 weeks old that haven't been acted on.",
-        why: `${stale.length} signals are older than 2 weeks and still in “new” — likely worth grouping for a sweep.`,
-        confidence: confFromSize(stale.length),
-        reasons: ["same_action"],
-        signalIds: stale.map(s => s.id).slice(0, 20),
-      });
-    }
-    // De-dup heavy overlap.
-    const filtered: Suggestion[] = [];
-    for (const s of out) {
-      const overlap = filtered.find(prev => {
-        const a = new Set(prev.signalIds);
-        const shared = s.signalIds.filter(id => a.has(id)).length;
-        return shared / Math.min(prev.signalIds.length, s.signalIds.length) > 0.7;
-      });
-      if (overlap) continue;
-      filtered.push(s);
-    }
-    return filtered.slice(0, 6);
-  }, [ungroupedSignals]);
 
   // ── Per-signal AI suggestions ──────────────────────────────────────
-  // Hybrid mode core: every time the group's identity OR the staging
-  // selection changes, score every non-selected, non-dismissed signal
-  // by lexical overlap against:
-  //   • the group name
-  //   • the context/notes
-  //   • the reason labels (so "same client" adds "client" to the bag)
-  //   • the TITLES of the signals already in the staging set
-  // Top 10 signals (by score > 0) surface with a Why-it-fits line.
+  // The group's NAME is a label — it doesn't feed AI scoring. AI
+  // matches against the user's stated intent (description) and the
+  // signals they've already picked manually. Reasons get a small
+  // weight as soft hints (kept because they're categorical), but the
+  // primary anchors are description + selected signals.
   type SuggestedSignal = { signal: Signal; score: number; why: string };
-  const perSignalSuggestions: SuggestedSignal[] = useMemo(() => {
+  // Raw scored matches against the group's stated intent. Doesn't
+  // honour filter chips yet — those are applied at render time so
+  // toggling a filter is instant once the AI has run.
+  const rawAiMatches: SuggestedSignal[] = useMemo(() => {
     const STOP = new Set(["the","and","with","that","this","from","into","when","where","what","have","been","were","over","under","need","needs","also","just","very","more","less","like","make","made","please","still","again","while","about","cannot","doesnt","doesn","could","would","should","since","there","their","than","then","these","those","such","each","other","onto","upon","does","done","much","most","some","only","seem","seems","feedback","note"]);
     const tokenize = (text: string): string[] => {
       const toks = text.toLowerCase().match(/[a-z]{4,}/g) ?? [];
       return toks.filter(t => !STOP.has(t));
     };
-    const bag = new Map<string, "name" | "context" | "reason" | "selected">();
-    const addTokens = (text: string, source: "name" | "context" | "reason" | "selected") => {
+    const bag = new Map<string, "context" | "reason" | "selected">();
+    const addTokens = (text: string, source: "context" | "reason" | "selected") => {
       for (const t of tokenize(text)) {
         if (!bag.has(t)) bag.set(t, source);
       }
     };
-    addTokens(name, "name");
     addTokens(notes, "context");
     for (const r of reasons) addTokens(SIGNAL_GROUP_REASON_LABEL[r], "reason");
     const selectedSignalsList = signals.filter(s => selectedSignalIds.has(s.id));
-    for (const s of selectedSignalsList) addTokens(s.title, "selected");
+    for (const s of selectedSignalsList) addTokens(s.title + " " + (s.description ?? ""), "selected");
     if (bag.size === 0) return []; // nothing to match against
 
     const out: SuggestedSignal[] = [];
@@ -7375,39 +7342,79 @@ function NewGroupModalImpl({
       if (selectedSignalIds.has(s.id)) continue;
       const text = (s.title + " " + (s.description ?? "")).toLowerCase();
       let score = 0;
-      const matched: { token: string; source: "name" | "context" | "reason" | "selected" }[] = [];
+      const matched: { token: string; source: "context" | "reason" | "selected" }[] = [];
       bag.forEach((source, t) => {
         if (text.includes(t)) {
-          score += source === "name" ? 4 : source === "selected" ? 3 : source === "reason" ? 2 : 2;
+          score += source === "selected" ? 4 : source === "context" ? 3 : 1;
           matched.push({ token: t, source });
         }
       });
       if (score <= 0) continue;
-      // Why-it-fits: name keyword > selected-overlap > reason > context.
-      const nameMatch = matched.find(m => m.source === "name");
+      // Why-it-fits: selected-overlap > description > reason.
       const selectedMatch = matched.filter(m => m.source === "selected").length;
+      const contextMatch = matched.find(m => m.source === "context");
       const reasonMatch = matched.find(m => m.source === "reason");
       let why = "";
-      if (nameMatch) why = `Matches the group name keyword "${nameMatch.token}".`;
-      else if (selectedMatch > 0) why = `Shares ${selectedMatch} keyword${selectedMatch === 1 ? "" : "s"} with your selected signals.`;
+      if (selectedMatch > 0) why = `Shares ${selectedMatch} keyword${selectedMatch === 1 ? "" : "s"} with your selected signals.`;
+      else if (contextMatch) why = `Matches keyword "${contextMatch.token}" from the description.`;
       else if (reasonMatch) why = `Matches reason keyword "${reasonMatch.token}".`;
-      else why = `Matches keyword "${matched[0].token}" from the group context.`;
+      else why = `Matches keyword "${matched[0].token}".`;
       out.push({ signal: s, score, why });
     }
     out.sort((a, b) => b.score - a.score);
     return out;
-  }, [name, notes, reasons, selectedSignalIds, signals]);
+  }, [notes, reasons, selectedSignalIds, signals]);
 
-  // Lookup: signal id → AI-suggestion metadata. Used by the Browse all
-  // list to surface the AI-suggested pill + Why-line on rows that the
-  // scorer matched.
-  const aiSuggestionById = useMemo(() => {
+  // AI-matched signals — `rawAiMatches` minus selected + dismissed.
+  // We only show the AI pill on these specific rows; the rest of the
+  // Browse all list renders without a pill. Stored as a lookup so the
+  // Browse rows can check membership in O(1).
+  const aiMatchById = useMemo(() => {
+    if (aiState !== "ready") return new Map<string, { score: number; why: string }>();
     const map = new Map<string, { score: number; why: string }>();
-    for (const s of perSignalSuggestions) map.set(s.signal.id, { score: s.score, why: s.why });
+    for (const m of rawAiMatches) {
+      const s = m.signal;
+      if (selectedSignalIds.has(s.id)) continue;
+      if (dismissedSignalIds.has(s.id)) continue;
+      map.set(s.id, { score: m.score, why: m.why });
+    }
     return map;
-  }, [perSignalSuggestions]);
+  }, [aiState, rawAiMatches, selectedSignalIds, dismissedSignalIds]);
+
+  // Detect "stale" AI state — the user changed the inputs since the
+  // last Find run. We show a small "Refresh suggestions" hint then.
+  const aiStale = useMemo(() => {
+    if (aiState !== "ready" || !aiSnapshot) return false;
+    return aiSnapshot.notes !== notes.trim()
+      || aiSnapshot.reasons.join("|") !== reasons.join("|")
+      || aiSnapshot.selectedCount !== selectedSignalIds.size;
+  }, [aiState, aiSnapshot, notes, reasons, selectedSignalIds]);
+
+  // Has the user given the AI something to anchor against? Per the
+  // product brief: AI needs either a description or at least one
+  // manually-picked signal — the name alone doesn't count.
+  const aiCanRun = notes.trim().length > 0 || selectedSignalIds.size > 0;
+
+  const runFindRelevantSignals = () => {
+    if (!aiCanRun) return;
+    setAiState("loading");
+    setDismissedSignalIds(new Set());
+    // Short artificial delay so the action reads as AI processing,
+    // not an instant local filter — keeps the affordance honest.
+    setTimeout(() => {
+      setAiSnapshot({
+        notes: notes.trim(),
+        reasons: reasons.slice(),
+        selectedCount: selectedSignalIds.size,
+      });
+      setAiState("ready");
+    }, 700);
+  };
 
   const addSuggestedSignal = (id: string) => setSelectedSignalIds(prev => {
+    const next = new Set(prev); next.add(id); return next;
+  });
+  const dismissSuggestedSignal = (id: string) => setDismissedSignalIds(prev => {
     const next = new Set(prev); next.add(id); return next;
   });
   const removeSelectedSignal = (id: string) => setSelectedSignalIds(prev => {
@@ -7421,40 +7428,24 @@ function NewGroupModalImpl({
     [signals, selectedSignalIds],
   );
 
-  // Browse-all filtered list — every signal NOT already selected, with
-  // AI-suggested matches sorted to the top so they're the first thing
-  // the reviewer sees. The "AI suggested" pill + Why-line render
-  // inline on the row, so the user gets the AI hint without leaving
-  // this single list.
+  // Browse-all filtered list — every signal NOT already selected,
+  // with AI-matched rows sorted first so the user sees the most
+  // relevant suggestions at the top of the unified list.
   const browseFiltered = useMemo(() => {
     const q = pickQuery.trim().toLowerCase();
-    const filtered = signals.filter(s => {
+    const matches = signals.filter(s => {
       if (selectedSignalIds.has(s.id)) return false;
       if (!q) return true;
       return s.title.toLowerCase().includes(q) || (s.description ?? "").toLowerCase().includes(q);
     });
-    // Sort: AI-suggested (highest score first) before plain rows.
-    filtered.sort((a, b) => {
-      const sa = aiSuggestionById.get(a.id)?.score ?? 0;
-      const sb = aiSuggestionById.get(b.id)?.score ?? 0;
-      return sb - sa;
+    matches.sort((a, b) => {
+      const aScore = aiMatchById.get(a.id)?.score ?? -1;
+      const bScore = aiMatchById.get(b.id)?.score ?? -1;
+      if (aScore !== bScore) return bScore - aScore;
+      return 0;
     });
-    return filtered.slice(0, 100);
-  }, [signals, selectedSignalIds, pickQuery, aiSuggestionById]);
-
-  // Add ALL signals from a suggestion to the staging set. Optionally
-  // also seeds the name/notes/reasons fields when they're empty so the
-  // user doesn't have to retype.
-  const applySuggestion = (s: Suggestion) => {
-    setSelectedSignalIds(prev => {
-      const next = new Set(prev);
-      s.signalIds.forEach(id => next.add(id));
-      return next;
-    });
-    if (name.trim() === "") setName(s.name);
-    if (notes.trim() === "") setNotes(s.notes);
-    if (reasons.length === 0) setReasons(s.reasons);
-  };
+    return matches.slice(0, 100);
+  }, [signals, selectedSignalIds, pickQuery, aiMatchById]);
 
   return createPortal(
     <div
@@ -7496,13 +7487,36 @@ function NewGroupModalImpl({
           </button>
         </div>
 
-        {/* ── Identity fields ─────────────────────────────────────── */}
+        {/* ── Identity fields ───────────────────────────────────────
+            Description is the PRIMARY input — it's what AI scores
+            against (alongside any signals the user picks manually).
+            Name comes second; it's a label, not an AI input. */}
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
-            Group name
+            Description <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· start here — AI uses this (plus any signals you pick) to find matches</span>
+          </label>
+          <textarea
+            autoFocus
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            rows={3}
+            placeholder="What kind of signals should belong here? e.g. Find signals related to broken layouts, small screens, mobile navigation, or responsive UI problems."
+            style={{
+              padding: "8px 10px",
+              border: "1px solid var(--border)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
+              resize: "vertical",
+            }}
+            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+            onBlur={e => (e.target.style.borderColor = "var(--border)")}
+          />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
+            Group name <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· short label for the list</span>
           </label>
           <input
-            autoFocus
             value={name}
             onChange={e => setName(e.target.value)}
             placeholder="e.g. Mobile responsiveness issues"
@@ -7511,26 +7525,6 @@ function NewGroupModalImpl({
               border: "1px solid var(--border)", borderRadius: "var(--radius)",
               background: "var(--bg)", color: "var(--text)",
               fontSize: "var(--fs-body)", outline: "none",
-            }}
-            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
-            onBlur={e => (e.target.style.borderColor = "var(--border)")}
-          />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
-            Context / theme <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· optional</span>
-          </label>
-          <textarea
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
-            rows={2}
-            placeholder="What ties these signals together?"
-            style={{
-              padding: "8px 10px",
-              border: "1px solid var(--border)", borderRadius: "var(--radius)",
-              background: "var(--bg)", color: "var(--text)",
-              fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none",
-              resize: "vertical",
             }}
             onFocus={e => (e.target.style.borderColor = "var(--accent)")}
             onBlur={e => (e.target.style.borderColor = "var(--border)")}
@@ -7668,7 +7662,7 @@ function NewGroupModalImpl({
                 border: "1px dashed var(--border)", background: "var(--bg)",
                 fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5,
               }}>
-                No signals picked yet. Add some from the AI suggestions below, click <em>Use this</em> on a group idea, or open <em>Browse all signals</em> to search manually.
+                No signals picked yet. Write a description above (or open <em>Browse all signals</em> below and pick a few manually) — then click <em>Find relevant signals</em> to let AI suggest matches based on what you've written or chosen.
               </div>
             ) : (
               <div style={{
@@ -7688,6 +7682,7 @@ function NewGroupModalImpl({
                     selected
                     signalGroups={signalGroups}
                     attachments={signalAttachments}
+                    wipItems={wipItems}
                     onRemove={() => removeSelectedSignal(s.id)}
                   />
                 ))}
@@ -7695,170 +7690,93 @@ function NewGroupModalImpl({
             )}
           </div>
 
-          {/* Sections C + D — single segmented toggle. Browse all (with
-              AI suggestions woven in via row pills) OR ✦ Group ideas
-              (cluster cards). One mode at a time so the modal doesn't
-              get tall. */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <div style={{ display: "inline-flex", gap: 2, background: "var(--bg)", borderRadius: 100, padding: 2, border: "1px solid var(--border)" }}>
-              {([
-                { key: "browse", label: "Browse all signals", count: browseFiltered.length },
-                { key: "ideas",  label: "✦ Group ideas",       count: suggestions.length },
-              ] as const).map(opt => {
-                const active = addSource === opt.key;
-                return (
-                  <button
-                    key={opt.key}
-                    onClick={() => setAddSource(opt.key)}
-                    style={{
-                      padding: "3px 12px", borderRadius: 100, border: "none",
-                      background: active ? "var(--bg-sunken)" : "transparent",
-                      color: active ? "var(--text)" : "var(--text-secondary)",
-                      fontSize: 11, fontWeight: 500, cursor: "pointer",
-                    }}
-                  >
-                    {opt.label}
-                    <span style={{ color: active ? "var(--text-tertiary)" : "var(--text-tertiary)", marginLeft: 4 }}>
-                      · {opt.count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {addSource === "browse" && perSignalSuggestions.length > 0 && (
-              <span style={{
-                fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
-                color: "#7e22ce",
-                background: "rgba(168,85,247,0.10)",
-                border: "1px solid rgba(168,85,247,0.40)",
-                borderRadius: 100, padding: "1px 8px",
-              }}>
-                ✦ {perSignalSuggestions.length} AI suggested in list
-              </span>
-            )}
-          </div>
-
-          {/* Fixed-height wrapper so switching toggles doesn't resize
-              the modal. Both branches have their own internal scroll
-              capped near this number, so the visual frame stays put. */}
-          <div style={{ minHeight: 500, display: "flex", flexDirection: "column" }}>
-          {addSource === "ideas" ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {suggestions.length === 0 ? (
-                <div style={{
-                  padding: "10px 12px", borderRadius: "var(--radius)",
-                  border: "1px dashed var(--border)", background: "var(--bg)",
-                  fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5,
+          {/* Browse all signals — unified list. The "Find relevant
+              signals" action lives in this header so AI matches weave
+              back into the same browse list (marked with an AI
+              SUGGESTED pill + sorted to the top). One list, one mental
+              model: every signal lives here. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <button
+                onClick={() => setBrowseOpenLocal(o => !o)}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  background: "transparent", border: "none", padding: 0,
+                  cursor: "pointer",
+                }}
+              >
+                {browseOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" }}>
+                  Browse all signals
+                </span>
+                <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                  · {browseFiltered.length}
+                  {aiMatchById.size > 0 && (
+                    <span style={{ color: "#7e22ce", fontWeight: 600 }}> · {aiMatchById.size} AI-matched</span>
+                  )}
+                </span>
+              </button>
+              <span style={{ flex: 1 }} />
+              {aiState === "idle" && (
+                <button
+                  onClick={() => { setBrowseOpenLocal(true); runFindRelevantSignals(); }}
+                  disabled={!aiCanRun}
+                  title={aiCanRun
+                    ? "Scan every signal for matches against this group's description and any signals you've already picked."
+                    : "Write a description or pick at least one signal manually first — AI needs something to anchor against."}
+                  style={{
+                    padding: "5px 12px", borderRadius: 100,
+                    background: aiCanRun ? "#7e22ce" : "var(--bg-sunken)",
+                    color: aiCanRun ? "white" : "var(--text-tertiary)",
+                    border: "none", fontSize: 11.5, fontWeight: 600,
+                    cursor: aiCanRun ? "pointer" : "default",
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                  }}
+                >
+                  ✦ Find relevant signals
+                </button>
+              )}
+              {aiState === "loading" && (
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  padding: "5px 12px", borderRadius: 100,
+                  background: "rgba(168,85,247,0.08)",
+                  border: "1px dashed rgba(168,85,247,0.45)",
+                  fontSize: 11.5, color: "#7e22ce", fontWeight: 500,
                 }}>
-                  No obvious clusters in the ungrouped signal pool right now.
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto", paddingRight: 4 }}>
-                  {suggestions.map(sg => {
-                    const expanded = expandedSuggestionId === sg.id;
-                    const allIn = sg.signalIds.every(id => selectedSignalIds.has(id));
-                    const confPalette = sg.confidence === "high"
-                      ? { bg: "rgba(34,197,94,0.10)", fg: "#15803d", bd: "rgba(34,197,94,0.40)" }
-                      : sg.confidence === "medium"
-                        ? { bg: "rgba(59,130,246,0.10)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.35)" }
-                        : { bg: "var(--bg-sunken)", fg: "var(--text-secondary)", bd: "var(--border)" };
-                    return (
-                      <div
-                        key={sg.id}
-                        style={{
-                          border: "1px solid var(--border)", borderRadius: "var(--radius)",
-                          background: "var(--bg)",
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px" }}>
-                          <button
-                            onClick={() => setExpandedSuggestionId(expanded ? null : sg.id)}
-                            style={{
-                              flex: 1, minWidth: 0, textAlign: "left",
-                              background: "transparent", border: "none", padding: 0,
-                              cursor: "pointer",
-                              display: "flex", alignItems: "flex-start", gap: 8,
-                            }}
-                            title={expanded ? "Hide signals" : "Show the signals in this suggestion"}
-                          >
-                            <span style={{ marginTop: 3 }}>
-                              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                            </span>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
-                                  {sg.name}
-                                </span>
-                                <span style={{
-                                  fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, textTransform: "uppercase",
-                                  color: confPalette.fg, background: confPalette.bg,
-                                  border: `1px solid ${confPalette.bd}`,
-                                  borderRadius: 100, padding: "1px 7px",
-                                }}>
-                                  {sg.confidence} confidence
-                                </span>
-                                <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-                                  · {sg.signalIds.length} signal{sg.signalIds.length === 1 ? "" : "s"}
-                                </span>
-                              </div>
-                              <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                                <em style={{ color: "var(--text-tertiary)" }}>Why:</em> {sg.why}
-                              </div>
-                            </div>
-                          </button>
-                          <button
-                            onClick={() => applySuggestion(sg)}
-                            disabled={allIn}
-                            title={allIn ? "All these signals are already selected" : "Add every signal in this suggestion. If the group fields above are still empty, the suggestion seeds them as a starting point."}
-                            style={{
-                              padding: "4px 12px", borderRadius: 100,
-                              background: allIn ? "var(--bg-sunken)" : "var(--accent)",
-                              color: allIn ? "var(--text-tertiary)" : "white",
-                              border: "none", fontSize: 11, fontWeight: 600,
-                              cursor: allIn ? "default" : "pointer", whiteSpace: "nowrap",
-                            }}
-                          >
-                            {allIn ? "Added" : "Add all"}
-                          </button>
-                        </div>
-                        {expanded && (
-                          <div style={{
-                            borderTop: "1px solid var(--border)",
-                            padding: "8px 10px",
-                            display: "flex", flexDirection: "column", gap: 4,
-                            background: "var(--bg-sunken)",
-                            // Tight inner scroll so the expanded cluster
-                            // doesn't push other cluster headers off
-                            // the outer scroll container — the other
-                            // groups stay visible just below.
-                            maxHeight: 220, overflowY: "auto",
-                          }}>
-                            {sg.signalIds.map(id => {
-                              const sig = signals.find(x => x.id === id);
-                              if (!sig) return null;
-                              return (
-                                <ModalSignalRow
-                                  key={id}
-                                  signal={sig}
-                                  density={density === "grid" ? "comfortable" : density}
-                                  isSelected={selectedSignalIds.has(id)}
-                                  onToggle={() => toggleSignal(id)}
-                                  signalGroups={signalGroups}
-                                  attachments={signalAttachments}
-                                />
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                  <span style={{
+                    display: "inline-block", width: 10, height: 10,
+                    borderRadius: "50%",
+                    border: "2px solid rgba(168,85,247,0.20)",
+                    borderTopColor: "#7e22ce",
+                    animation: "spin 0.8s linear infinite",
+                  }} />
+                  AI is scanning signals…
+                </span>
+              )}
+              {aiState === "ready" && (
+                <button
+                  onClick={runFindRelevantSignals}
+                  title="Re-run AI matching with the latest description and selected signals."
+                  style={{
+                    padding: "4px 10px", borderRadius: 100,
+                    background: "var(--bg)", border: "1px solid var(--border)",
+                    color: "var(--text-secondary)", fontSize: 11, fontWeight: 500, cursor: "pointer",
+                  }}
+                >
+                  ↻ Refresh suggestions
+                </button>
               )}
             </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+
+            {browseOpen && (
+              <>
+                {aiState === "ready" && aiStale && (
+                  <div style={{ fontSize: 11, color: "var(--text-tertiary)", fontStyle: "italic" }}>
+                    Description or selection changed — click <strong style={{ color: "var(--text-secondary)" }}>↻ Refresh suggestions</strong> to rescore.
+                  </div>
+                )}
+
                 <input
                   value={pickQuery}
                   onChange={e => setPickQuery(e.target.value)}
@@ -7873,7 +7791,7 @@ function NewGroupModalImpl({
                   onBlur={e => (e.target.style.borderColor = "var(--border)")}
                 />
                 <div style={{
-                  maxHeight: 460, overflowY: "auto",
+                  maxHeight: 380, overflowY: "auto",
                   display: density === "grid" ? "grid" : "flex",
                   ...(density === "grid"
                     ? { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", alignItems: "stretch" }
@@ -7887,7 +7805,7 @@ function NewGroupModalImpl({
                     </div>
                   ) : (
                     browseFiltered.map(s => {
-                      const ai = aiSuggestionById.get(s.id);
+                      const ai = aiMatchById.get(s.id);
                       return (
                         <ModalSignalRow
                           key={s.id}
@@ -7897,6 +7815,7 @@ function NewGroupModalImpl({
                           onToggle={() => addSuggestedSignal(s.id)}
                           signalGroups={signalGroups}
                           attachments={signalAttachments}
+                          wipItems={wipItems}
                           aiSuggested={!!ai}
                           aiWhy={ai?.why}
                         />
@@ -7904,22 +7823,38 @@ function NewGroupModalImpl({
                     })
                   )}
                 </div>
-            </div>
-          )}
+              </>
+            )}
           </div>
         </div>
 
-        {/* ── Footer: running total + actions ──────────────────────── */}
+        {/* ── Footer: final-review summary + actions ───────────────── */}
         <div style={{
           display: "flex", alignItems: "center", gap: 10,
-          padding: "8px 0 0",
+          padding: "10px 12px",
+          marginTop: 4,
+          background: "var(--bg-sunken)",
+          border: "1px solid var(--border)", borderRadius: "var(--radius)",
         }}>
-          <span style={{ fontSize: 12, color: selectedSignalIds.size === 0 ? "var(--text-tertiary)" : "var(--text-secondary)" }}>
-            {selectedSignalIds.size === 0
-              ? "No signals selected — you can add some later in the workspace."
-              : `${selectedSignalIds.size} signal${selectedSignalIds.size === 1 ? "" : "s"} will be added to the new group`}
-          </span>
-          <span style={{ flex: 1 }} />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+              Review before creating
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.45, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <strong>{name.trim() || "(unnamed group)"}</strong>
+              {notes.trim() && (
+                <span style={{ color: "var(--text-tertiary)" }}> · {notes.trim().length > 60 ? notes.trim().slice(0, 57) + "…" : notes.trim()}</span>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: selectedSignalIds.size === 0 ? "var(--text-tertiary)" : "var(--text-secondary)" }}>
+              {selectedSignalIds.size === 0
+                ? "No signals selected — group will start empty."
+                : `${selectedSignalIds.size} signal${selectedSignalIds.size === 1 ? "" : "s"} will be added`}
+              {reasons.length > 0 && (
+                <span style={{ color: "var(--text-tertiary)" }}> · {reasons.length} reason{reasons.length === 1 ? "" : "s"}</span>
+              )}
+            </div>
+          </div>
           <button
             onClick={onClose}
             style={{
@@ -7953,6 +7888,834 @@ function NewGroupModalImpl({
   );
 }
 
+// ── PrepareGroupsModal ─────────────────────────────────────────────
+// Multi-group preparation workspace. The user defines several group
+// drafts (each with its own description, optional name, reasons, and
+// signal selections), runs AI suggestions per-draft (or for all
+// drafts in one click), reviews/edits, then creates them all in one
+// shot. Nothing is persisted until the user hits a Create button —
+// drafts live entirely in this component's local state, keeping the
+// workspace safely throwaway. The per-draft editor mirrors the
+// single-group NewGroupModal so the interaction feels familiar.
+type GroupDraft = {
+  id: string;
+  name: string;
+  notes: string;
+  reasons: SignalGroupReason[];
+  selectedSignalIds: string[];
+  dismissedSignalIds: string[];
+  aiState: "idle" | "loading" | "ready";
+  // Cached scored matches from the last Find run. We cache (rather
+  // than recomputing on every render) so cross-draft state changes
+  // don't churn a list the user is actively reviewing — the matches
+  // only refresh when the user clicks Find again.
+  aiMatches: { signalId: string; score: number; why: string }[];
+  aiSnapshot: { notes: string; reasons: string[]; selectedCount: number } | null;
+};
+
+// Pure scoring helper — same shape as the inline scorer in
+// NewGroupModalImpl, but pulled out so PrepareGroupsModal can call it
+// once per draft without re-implementing the bag-of-tokens logic. The
+// group's name is NOT an input here; AI anchors on description +
+// already-selected signals (reasons add a small soft weight).
+function scoreSignalsForDraft(
+  notes: string,
+  reasons: SignalGroupReason[],
+  selectedIds: string[],
+  signals: Signal[],
+): { signalId: string; score: number; why: string }[] {
+  const STOP = new Set(["the","and","with","that","this","from","into","when","where","what","have","been","were","over","under","need","needs","also","just","very","more","less","like","make","made","please","still","again","while","about","cannot","doesnt","doesn","could","would","should","since","there","their","than","then","these","those","such","each","other","onto","upon","does","done","much","most","some","only","seem","seems","feedback","note"]);
+  const tokenize = (text: string): string[] => {
+    const toks = text.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+    return toks.filter(t => !STOP.has(t));
+  };
+  const bag = new Map<string, "context" | "reason" | "selected">();
+  const addTokens = (text: string, source: "context" | "reason" | "selected") => {
+    for (const t of tokenize(text)) {
+      if (!bag.has(t)) bag.set(t, source);
+    }
+  };
+  addTokens(notes, "context");
+  for (const r of reasons) addTokens(SIGNAL_GROUP_REASON_LABEL[r], "reason");
+  const selectedSet = new Set(selectedIds);
+  const selectedList = signals.filter(s => selectedSet.has(s.id));
+  for (const s of selectedList) addTokens(s.title + " " + (s.description ?? ""), "selected");
+  if (bag.size === 0) return [];
+
+  const out: { signalId: string; score: number; why: string }[] = [];
+  for (const s of signals) {
+    if (selectedSet.has(s.id)) continue;
+    const text = (s.title + " " + (s.description ?? "")).toLowerCase();
+    let score = 0;
+    const matched: { token: string; source: "context" | "reason" | "selected" }[] = [];
+    bag.forEach((source, t) => {
+      if (text.includes(t)) {
+        score += source === "selected" ? 4 : source === "context" ? 3 : 1;
+        matched.push({ token: t, source });
+      }
+    });
+    if (score <= 0) continue;
+    const selectedMatch = matched.filter(m => m.source === "selected").length;
+    const contextMatch = matched.find(m => m.source === "context");
+    const reasonMatch = matched.find(m => m.source === "reason");
+    let why = "";
+    if (selectedMatch > 0) why = `Shares ${selectedMatch} keyword${selectedMatch === 1 ? "" : "s"} with your selected signals.`;
+    else if (contextMatch) why = `Matches keyword "${contextMatch.token}" from the description.`;
+    else if (reasonMatch) why = `Matches reason keyword "${reasonMatch.token}".`;
+    else why = `Matches keyword "${matched[0].token}".`;
+    out.push({ signalId: s.id, score, why });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out;
+}
+
+function PrepareGroupsModal({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (drafts: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }[]) => void;
+}) {
+  const { signals, signalGroups, signalAttachments, wipItems } = useStore();
+  const draftCounterRef = useRef(0);
+  const makeDraft = (): GroupDraft => ({
+    id: `pgd-${++draftCounterRef.current}`,
+    name: "",
+    notes: "",
+    reasons: [],
+    selectedSignalIds: [],
+    dismissedSignalIds: [],
+    aiState: "idle",
+    aiMatches: [],
+    aiSnapshot: null,
+  });
+  const [drafts, setDrafts] = useState<GroupDraft[]>(() => [makeDraft()]);
+  const [activeId, setActiveId] = useState<string>(drafts[0].id);
+  const [pickQuery, setPickQuery] = useState("");
+  // Inline confirmation for "create with 0 signals selected". Single
+  // = one draft via its own Create button; all = the bulk Create-all
+  // action with at least one empty ready draft in the mix.
+  const [confirmEmpty, setConfirmEmpty] = useState<
+    null | { kind: "single"; id: string } | { kind: "all" }
+  >(null);
+  const [reasonsOpenForDraft, setReasonsOpenForDraft] = useState<string | null>(null);
+
+  // If the active draft gets removed, fall back to the first available.
+  useEffect(() => {
+    if (!drafts.some(d => d.id === activeId)) {
+      setActiveId(drafts[0]?.id ?? "");
+    }
+  }, [drafts, activeId]);
+
+  const active = drafts.find(d => d.id === activeId) ?? null;
+
+  const updateDraft = (id: string, patch: Partial<GroupDraft>) => {
+    setDrafts(prev => prev.map(d => d.id === id ? { ...d, ...patch } : d));
+  };
+  const addDraft = () => {
+    const d = makeDraft();
+    setDrafts(prev => [...prev, d]);
+    setActiveId(d.id);
+    setPickQuery("");
+  };
+  const duplicateDraft = (id: string) => {
+    const src = drafts.find(d => d.id === id);
+    if (!src) return;
+    const copy: GroupDraft = {
+      ...src,
+      id: `pgd-${++draftCounterRef.current}`,
+      name: src.name ? `${src.name} (copy)` : "",
+      // Reset AI cache — the duplicate is a fresh draft conceptually,
+      // and otherwise the user sees stale matches that don't match the
+      // copy's identity.
+      aiState: "idle",
+      aiMatches: [],
+      aiSnapshot: null,
+      selectedSignalIds: src.selectedSignalIds.slice(),
+      dismissedSignalIds: src.dismissedSignalIds.slice(),
+      reasons: src.reasons.slice(),
+    };
+    setDrafts(prev => {
+      const idx = prev.findIndex(d => d.id === id);
+      const next = prev.slice();
+      next.splice(idx + 1, 0, copy);
+      return next;
+    });
+    setActiveId(copy.id);
+  };
+  const removeDraft = (id: string) => {
+    setDrafts(prev => {
+      const next = prev.filter(d => d.id !== id);
+      // Always keep at least one draft slot so the editor pane has
+      // something to render — saves the user a click when they remove
+      // the last draft and want to start over.
+      return next.length === 0 ? [makeDraft()] : next;
+    });
+  };
+
+  const toggleSignalInDraft = (draftId: string, signalId: string) => {
+    setDrafts(prev => prev.map(d => {
+      if (d.id !== draftId) return d;
+      const has = d.selectedSignalIds.includes(signalId);
+      const nextSelected = has
+        ? d.selectedSignalIds.filter(x => x !== signalId)
+        : [...d.selectedSignalIds, signalId];
+      // Adding a signal also lifts a prior dismiss so re-removing
+      // surfaces the AI pill again rather than silently hiding the row.
+      const nextDismissed = has ? d.dismissedSignalIds : d.dismissedSignalIds.filter(x => x !== signalId);
+      return { ...d, selectedSignalIds: nextSelected, dismissedSignalIds: nextDismissed };
+    }));
+  };
+  const dismissSuggestionInDraft = (draftId: string, signalId: string) => {
+    setDrafts(prev => prev.map(d => {
+      if (d.id !== draftId) return d;
+      if (d.dismissedSignalIds.includes(signalId)) return d;
+      return { ...d, dismissedSignalIds: [...d.dismissedSignalIds, signalId] };
+    }));
+  };
+
+  const aiCanRun = (d: GroupDraft) => d.notes.trim().length > 0 || d.selectedSignalIds.length > 0;
+
+  const finalizeFindRun = (id: string) => {
+    setDrafts(prev => prev.map(d => {
+      if (d.id !== id) return d;
+      if (!aiCanRun(d)) return { ...d, aiState: "idle" as const };
+      const matches = scoreSignalsForDraft(d.notes, d.reasons, d.selectedSignalIds, signals);
+      return {
+        ...d,
+        aiState: "ready" as const,
+        aiMatches: matches,
+        aiSnapshot: {
+          notes: d.notes.trim(),
+          reasons: d.reasons.slice(),
+          selectedCount: d.selectedSignalIds.length,
+        },
+      };
+    }));
+  };
+  const runFindForDraft = (id: string) => {
+    setDrafts(prev => prev.map(d => d.id === id ? { ...d, aiState: "loading" as const, dismissedSignalIds: [] } : d));
+    setTimeout(() => finalizeFindRun(id), 700);
+  };
+  const runFindForAll = () => {
+    const runnable = drafts.filter(aiCanRun).map(d => d.id);
+    if (runnable.length === 0) return;
+    setDrafts(prev => prev.map(d => aiCanRun(d) ? { ...d, aiState: "loading" as const, dismissedSignalIds: [] } : d));
+    // Slight staggered finish so each draft visibly progresses rather
+    // than all flipping at once — reads as honest per-draft work.
+    runnable.forEach((id, i) => {
+      setTimeout(() => finalizeFindRun(id), 600 + i * 200);
+    });
+  };
+
+  // signalId → drafts that have it selected. Drives the "Also
+  // selected in: …" hint underneath browse rows so the user can see
+  // overlap without it being silently hidden.
+  const overlapMap = useMemo(() => {
+    const m = new Map<string, { id: string; label: string }[]>();
+    for (const d of drafts) {
+      const label = d.name.trim() || "Untitled draft";
+      for (const sid of d.selectedSignalIds) {
+        const arr = m.get(sid) ?? [];
+        arr.push({ id: d.id, label });
+        m.set(sid, arr);
+      }
+    }
+    return m;
+  }, [drafts]);
+
+  // A draft is "ready" if it has a name (the group needs a label).
+  // Empty signal sets are allowed but trigger a confirm step before
+  // creation, so users don't accidentally create blank groups.
+  const isReady = (d: GroupDraft) => d.name.trim().length > 0;
+  const readyDrafts = drafts.filter(isReady);
+  const readyEmptyDrafts = readyDrafts.filter(d => d.selectedSignalIds.length === 0);
+
+  const doCreate = (toCreate: GroupDraft[]) => {
+    if (toCreate.length === 0) return;
+    onCreate(toCreate.map(d => ({
+      name: d.name.trim(),
+      notes: d.notes.trim() || undefined,
+      reasons: d.reasons,
+      signalIds: d.selectedSignalIds.slice(),
+    })));
+  };
+  const handleCreateSingle = (id: string) => {
+    const d = drafts.find(x => x.id === id);
+    if (!d || !isReady(d)) return;
+    if (d.selectedSignalIds.length === 0) {
+      setConfirmEmpty({ kind: "single", id });
+      return;
+    }
+    doCreate([d]);
+  };
+  const handleCreateAll = () => {
+    if (readyDrafts.length === 0) return;
+    if (readyEmptyDrafts.length > 0) {
+      setConfirmEmpty({ kind: "all" });
+      return;
+    }
+    doCreate(readyDrafts);
+  };
+  const confirmCreate = () => {
+    if (!confirmEmpty) return;
+    if (confirmEmpty.kind === "single") {
+      const d = drafts.find(x => x.id === confirmEmpty.id);
+      setConfirmEmpty(null);
+      if (d) doCreate([d]);
+    } else {
+      setConfirmEmpty(null);
+      doCreate(readyDrafts);
+    }
+  };
+
+  // Active-draft AI map — only signals that survived dismiss/selected.
+  const activeAiMatchMap = useMemo(() => {
+    if (!active || active.aiState !== "ready") return new Map<string, { score: number; why: string }>();
+    const dismissed = new Set(active.dismissedSignalIds);
+    const selected = new Set(active.selectedSignalIds);
+    const m = new Map<string, { score: number; why: string }>();
+    for (const x of active.aiMatches) {
+      if (selected.has(x.signalId)) continue;
+      if (dismissed.has(x.signalId)) continue;
+      m.set(x.signalId, { score: x.score, why: x.why });
+    }
+    return m;
+  }, [active]);
+  const browseFiltered = useMemo(() => {
+    if (!active) return [] as Signal[];
+    const q = pickQuery.trim().toLowerCase();
+    const selected = new Set(active.selectedSignalIds);
+    const rows = signals.filter(s => {
+      if (selected.has(s.id)) return false;
+      if (!q) return true;
+      return s.title.toLowerCase().includes(q) || (s.description ?? "").toLowerCase().includes(q);
+    });
+    rows.sort((a, b) => {
+      const aScore = activeAiMatchMap.get(a.id)?.score ?? -1;
+      const bScore = activeAiMatchMap.get(b.id)?.score ?? -1;
+      if (aScore !== bScore) return bScore - aScore;
+      return 0;
+    });
+    return rows.slice(0, 100);
+  }, [signals, active, pickQuery, activeAiMatchMap]);
+  const activeAiStale = useMemo(() => {
+    if (!active || active.aiState !== "ready" || !active.aiSnapshot) return false;
+    return active.aiSnapshot.notes !== active.notes.trim()
+      || active.aiSnapshot.reasons.join("|") !== active.reasons.join("|")
+      || active.aiSnapshot.selectedCount !== active.selectedSignalIds.length;
+  }, [active]);
+
+  const anyAiCanRunForAll = drafts.some(aiCanRun);
+  const anyAiLoading = drafts.some(d => d.aiState === "loading");
+
+  return createPortal(
+    <div
+      role="dialog"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(15,23,42,0.45)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        style={{
+          width: 1200, maxWidth: "100%",
+          height: "calc(100vh - 32px)", maxHeight: 940,
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+        }}
+        onMouseDown={e => e.stopPropagation()}
+      >
+        {/* ── Top toolbar ────────────────────────────────────────── */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "12px 18px",
+          borderBottom: "1px solid var(--border)", flexShrink: 0,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
+              Prepare multiple groups
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+              Draft several groups before a review meeting · {drafts.length} draft{drafts.length === 1 ? "" : "s"} · {readyDrafts.length} ready to create
+            </div>
+          </div>
+          <button
+            onClick={runFindForAll}
+            disabled={!anyAiCanRunForAll || anyAiLoading}
+            title={
+              anyAiLoading ? "AI is already scanning…"
+                : anyAiCanRunForAll
+                  ? "Run AI matching for every draft that has a description or selected signal."
+                  : "Add a description (or pick a signal) in at least one draft first."
+            }
+            style={{
+              padding: "6px 14px", borderRadius: 100,
+              background: anyAiCanRunForAll && !anyAiLoading ? "#7e22ce" : "var(--bg-sunken)",
+              color: anyAiCanRunForAll && !anyAiLoading ? "white" : "var(--text-tertiary)",
+              border: "none", fontSize: 12, fontWeight: 600,
+              cursor: anyAiCanRunForAll && !anyAiLoading ? "pointer" : "default",
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}
+          >
+            {anyAiLoading && (
+              <span style={{
+                display: "inline-block", width: 10, height: 10,
+                borderRadius: "50%",
+                border: "2px solid rgba(255,255,255,0.30)", borderTopColor: "white",
+                animation: "spin 0.8s linear infinite",
+              }} />
+            )}
+            ✦ Find signals for all
+          </button>
+          <button
+            onClick={handleCreateAll}
+            disabled={readyDrafts.length === 0}
+            title={readyDrafts.length === 0 ? "Add a name to at least one draft first" : `Create the ${readyDrafts.length} ready draft${readyDrafts.length === 1 ? "" : "s"}`}
+            style={{
+              padding: "6px 14px", borderRadius: "var(--radius)",
+              background: readyDrafts.length > 0 ? "var(--accent)" : "var(--bg-sunken)",
+              color: readyDrafts.length > 0 ? "white" : "var(--text-tertiary)",
+              border: "none", fontSize: 12, fontWeight: 600,
+              cursor: readyDrafts.length > 0 ? "pointer" : "default",
+            }}
+          >
+            Create all ready ({readyDrafts.length})
+          </button>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              padding: 4, background: "transparent", border: "none",
+              cursor: "pointer", color: "var(--text-tertiary)",
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Empty-group confirm strip — inline, non-blocking. */}
+        {confirmEmpty && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "10px 18px",
+            background: "rgba(245,158,11,0.08)",
+            borderBottom: "1px solid rgba(245,158,11,0.30)",
+          }}>
+            <span style={{ fontSize: 12, color: "var(--text)" }}>
+              {confirmEmpty.kind === "single"
+                ? "This group has no signals selected. Create it empty — you can add signals later?"
+                : `${readyEmptyDrafts.length} of the ${readyDrafts.length} ready group${readyDrafts.length === 1 ? "" : "s"} have no signals selected. Create them anyway — you can add signals later?`}
+            </span>
+            <span style={{ flex: 1 }} />
+            <button
+              onClick={() => setConfirmEmpty(null)}
+              style={{ padding: "4px 12px", borderRadius: "var(--radius)", background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500, cursor: "pointer" }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmCreate}
+              style={{ padding: "4px 12px", borderRadius: "var(--radius)", background: "#b45309", color: "white", border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}
+            >
+              {confirmEmpty.kind === "single" ? "Create empty" : "Create all"}
+            </button>
+          </div>
+        )}
+
+        {/* ── Two-pane body ─────────────────────────────────────── */}
+        <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+          {/* ── Left: drafts list ──────────────────────────────── */}
+          <div style={{
+            width: 320, flexShrink: 0,
+            borderRight: "1px solid var(--border)",
+            background: "var(--bg-sunken)",
+            display: "flex", flexDirection: "column",
+          }}>
+            <div style={{
+              padding: "10px 12px",
+              borderBottom: "1px solid var(--border)",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", flex: 1 }}>
+                Group drafts
+              </span>
+              <button
+                onClick={addDraft}
+                title="Add a new empty draft"
+                style={{ padding: "4px 10px", borderRadius: 100, background: "var(--accent)", color: "white", border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+              >
+                + Add draft
+              </button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {drafts.map(d => {
+                const isActive = d.id === activeId;
+                const ready = isReady(d);
+                const suggested = d.aiState === "ready"
+                  ? d.aiMatches.filter(m => !d.selectedSignalIds.includes(m.signalId) && !d.dismissedSignalIds.includes(m.signalId)).length
+                  : 0;
+                return (
+                  <div
+                    key={d.id}
+                    onClick={() => { setActiveId(d.id); setPickQuery(""); }}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius)",
+                      border: isActive ? "1px solid var(--accent)" : "1px solid var(--border)",
+                      background: isActive ? "var(--accent-soft)" : "var(--bg)",
+                      cursor: "pointer", display: "flex", flexDirection: "column", gap: 4,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {d.name.trim() || <span style={{ color: "var(--text-tertiary)", fontWeight: 500, fontStyle: "italic" }}>Untitled draft</span>}
+                      </span>
+                      {ready ? (
+                        <span title="Ready to create" style={{ fontSize: 9, fontWeight: 700, color: "#15803d", background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.30)", borderRadius: 100, padding: "0 6px" }}>READY</span>
+                      ) : (
+                        <span title="Needs a name before it can be created" style={{ fontSize: 9, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 100, padding: "0 6px" }}>DRAFT</span>
+                      )}
+                    </div>
+                    <div style={{
+                      fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.4,
+                      display: "-webkit-box", WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical", overflow: "hidden",
+                    }}>
+                      {d.notes.trim() || <em style={{ color: "var(--text-tertiary)" }}>No description yet</em>}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                      <span><strong style={{ color: "var(--text-secondary)" }}>{d.selectedSignalIds.length}</strong> selected</span>
+                      {d.aiState === "ready" && (
+                        <span>· <strong style={{ color: "#7e22ce" }}>{suggested}</strong> suggested</span>
+                      )}
+                      {d.aiState === "loading" && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#7e22ce" }}>
+                          ·
+                          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", border: "1.5px solid rgba(168,85,247,0.20)", borderTopColor: "#7e22ce", animation: "spin 0.8s linear infinite" }} />
+                          scanning…
+                        </span>
+                      )}
+                      {d.aiState === "idle" && (d.notes.trim() || d.selectedSignalIds.length > 0) && (
+                        <span>· AI not run</span>
+                      )}
+                      <span style={{ flex: 1 }} />
+                      <span
+                        role="button"
+                        title="Duplicate this draft"
+                        onClick={e => { e.stopPropagation(); duplicateDraft(d.id); }}
+                        style={{ padding: "1px 5px", borderRadius: 4, cursor: "pointer", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center" }}
+                        onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-sunken)")}
+                        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                      >
+                        <Copy size={10} />
+                      </span>
+                      <span
+                        role="button"
+                        title="Remove this draft"
+                        onClick={e => { e.stopPropagation(); removeDraft(d.id); }}
+                        style={{ padding: "1px 5px", borderRadius: 4, cursor: "pointer", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center" }}
+                        onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-sunken)")}
+                        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                      >
+                        <X size={10} />
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Right: active draft editor ─────────────────────── */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {active ? (
+              <>
+                <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+                  {/* Description (primary AI anchor) */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
+                      Description <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· AI uses this (plus any signals you pick) to find matches</span>
+                    </label>
+                    <textarea
+                      value={active.notes}
+                      onChange={e => updateDraft(active.id, { notes: e.target.value })}
+                      rows={3}
+                      placeholder="What kind of signals should belong here? e.g. Tickets reported by Kathleen last week · Mobile responsiveness issues · Onboarding confusion…"
+                      style={{ padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--fs-body)", lineHeight: 1.5, outline: "none", resize: "vertical" }}
+                      onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                      onBlur={e => (e.target.style.borderColor = "var(--border)")}
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
+                      Group name <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· short label · required to create</span>
+                    </label>
+                    <input
+                      value={active.name}
+                      onChange={e => updateDraft(active.id, { name: e.target.value })}
+                      placeholder="e.g. Mobile responsiveness issues"
+                      style={{ padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--fs-body)", outline: "none" }}
+                      onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                      onBlur={e => (e.target.style.borderColor = "var(--border)")}
+                    />
+                  </div>
+
+                  {/* Reasons — collapsed by default to keep editor compact. */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {active.reasons.length === 0 && reasonsOpenForDraft !== active.id ? (
+                      <button
+                        onClick={() => setReasonsOpenForDraft(active.id)}
+                        type="button"
+                        style={{ padding: "2px 10px", borderRadius: 100, background: "transparent", border: "1px dashed var(--border-strong)", color: "var(--text-tertiary)", fontSize: 11, fontWeight: 500, cursor: "pointer" }}
+                      >
+                        + Add reasons (optional)
+                      </button>
+                    ) : (
+                      <>
+                        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Reasons:</span>
+                        {active.reasons.map(r => (
+                          <button
+                            key={r}
+                            onClick={() => updateDraft(active.id, { reasons: active.reasons.filter(x => x !== r) })}
+                            type="button"
+                            title="Click to remove"
+                            style={{ padding: "2px 10px", borderRadius: 100, border: "1px solid var(--accent)", background: "var(--accent-soft)", color: "var(--accent)", fontSize: 11, fontWeight: 500, cursor: "pointer" }}
+                          >
+                            {SIGNAL_GROUP_REASON_LABEL[r]}
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => setReasonsOpenForDraft(reasonsOpenForDraft === active.id ? null : active.id)}
+                          type="button"
+                          style={{ padding: "2px 8px", borderRadius: 100, background: "transparent", border: "none", color: "var(--text-tertiary)", fontSize: 11, cursor: "pointer" }}
+                        >
+                          {reasonsOpenForDraft === active.id ? "Hide options" : "+ Add"}
+                        </button>
+                        {reasonsOpenForDraft === active.id && (
+                          <div style={{ display: "flex", flexBasis: "100%", flexWrap: "wrap", gap: 4 }}>
+                            {(Object.keys(SIGNAL_GROUP_REASON_LABEL) as SignalGroupReason[])
+                              .filter(r => !active.reasons.includes(r))
+                              .map(r => (
+                                <button
+                                  key={r}
+                                  onClick={() => updateDraft(active.id, { reasons: [...active.reasons, r] })}
+                                  type="button"
+                                  style={{ padding: "2px 10px", borderRadius: 100, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 11, fontWeight: 500, cursor: "pointer" }}
+                                >
+                                  + {SIGNAL_GROUP_REASON_LABEL[r]}
+                                </button>
+                              ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Selected signals chips */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" }}>
+                        Selected signals
+                      </span>
+                      <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>· {active.selectedSignalIds.length}</span>
+                    </div>
+                    {active.selectedSignalIds.length === 0 ? (
+                      <div style={{ padding: "10px 12px", borderRadius: "var(--radius)", border: "1px dashed var(--border)", background: "var(--bg)", fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
+                        Nothing selected yet. Write a description above, then click <em>Find relevant signals</em>, or pick manually from the list below.
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {active.selectedSignalIds.map(sid => {
+                          const s = signals.find(x => x.id === sid);
+                          if (!s) return null;
+                          return (
+                            <span key={sid} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 8px", borderRadius: 100, background: "var(--accent-soft)", border: "1px solid var(--accent)", color: "var(--accent)", fontSize: 11, fontWeight: 500 }}>
+                              <span style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
+                              <button
+                                type="button"
+                                onClick={() => toggleSignalInDraft(active.id, sid)}
+                                aria-label="Remove from this draft"
+                                style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "inherit", display: "inline-flex" }}
+                              >
+                                <X size={10} />
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Browse all + per-draft Find */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" }}>
+                        Browse all signals
+                      </span>
+                      <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                        · {browseFiltered.length}
+                        {activeAiMatchMap.size > 0 && (
+                          <span style={{ color: "#7e22ce", fontWeight: 600 }}> · {activeAiMatchMap.size} AI-matched</span>
+                        )}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      {active.aiState === "idle" && (
+                        <button
+                          onClick={() => runFindForDraft(active.id)}
+                          disabled={!aiCanRun(active)}
+                          title={aiCanRun(active) ? "Scan every signal for matches against this draft's description and selected signals." : "Write a description or pick a signal first."}
+                          style={{ padding: "5px 12px", borderRadius: 100, background: aiCanRun(active) ? "#7e22ce" : "var(--bg-sunken)", color: aiCanRun(active) ? "white" : "var(--text-tertiary)", border: "none", fontSize: 11.5, fontWeight: 600, cursor: aiCanRun(active) ? "pointer" : "default" }}
+                        >
+                          ✦ Find relevant signals
+                        </button>
+                      )}
+                      {active.aiState === "loading" && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 12px", borderRadius: 100, background: "rgba(168,85,247,0.08)", border: "1px dashed rgba(168,85,247,0.45)", fontSize: 11.5, color: "#7e22ce", fontWeight: 500 }}>
+                          <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", border: "2px solid rgba(168,85,247,0.20)", borderTopColor: "#7e22ce", animation: "spin 0.8s linear infinite" }} />
+                          AI is scanning signals…
+                        </span>
+                      )}
+                      {active.aiState === "ready" && (
+                        <button
+                          onClick={() => runFindForDraft(active.id)}
+                          title="Re-run AI matching with the latest description and selected signals."
+                          style={{ padding: "4px 10px", borderRadius: 100, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 11, fontWeight: 500, cursor: "pointer" }}
+                        >
+                          ↻ Refresh suggestions
+                        </button>
+                      )}
+                    </div>
+                    {active.aiState === "ready" && activeAiStale && (
+                      <div style={{ fontSize: 11, color: "var(--text-tertiary)", fontStyle: "italic" }}>
+                        Description or selection changed — click <strong style={{ color: "var(--text-secondary)" }}>↻ Refresh suggestions</strong> to rescore.
+                      </div>
+                    )}
+                    {active.aiState === "ready" && activeAiMatchMap.size > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <button
+                          onClick={() => {
+                            setDrafts(prev => prev.map(d => {
+                              if (d.id !== active.id) return d;
+                              const set = new Set(d.selectedSignalIds);
+                              activeAiMatchMap.forEach((_v, id) => set.add(id));
+                              return { ...d, selectedSignalIds: Array.from(set) };
+                            }));
+                          }}
+                          style={{ padding: "3px 10px", borderRadius: 100, background: "#7e22ce", color: "white", border: "none", fontSize: 10.5, fontWeight: 600, cursor: "pointer" }}
+                        >
+                          Add all {activeAiMatchMap.size} suggestion{activeAiMatchMap.size === 1 ? "" : "s"}
+                        </button>
+                        {active.dismissedSignalIds.length > 0 && (
+                          <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                            {active.dismissedSignalIds.length} dismissed this session
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <input
+                      value={pickQuery}
+                      onChange={e => setPickQuery(e.target.value)}
+                      placeholder="Search signals by title or description…"
+                      style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
+                      onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                      onBlur={e => (e.target.style.borderColor = "var(--border)")}
+                    />
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: 4 }}>
+                      {browseFiltered.length === 0 ? (
+                        <div style={{ padding: 12, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center" }}>
+                          {pickQuery ? "No signals match. Try a shorter query." : "Every signal is already selected."}
+                        </div>
+                      ) : (
+                        browseFiltered.map(s => {
+                          const ai = activeAiMatchMap.get(s.id);
+                          const otherDrafts = (overlapMap.get(s.id) ?? []).filter(x => x.id !== active.id);
+                          const dismissed = active.dismissedSignalIds.includes(s.id);
+                          return (
+                            <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 2, opacity: dismissed ? 0.55 : 1 }}>
+                              <ModalSignalRow
+                                signal={s}
+                                density="comfortable"
+                                isSelected={false}
+                                onToggle={() => toggleSignalInDraft(active.id, s.id)}
+                                signalGroups={signalGroups}
+                                attachments={signalAttachments}
+                                wipItems={wipItems}
+                                aiSuggested={!!ai && !dismissed}
+                                aiWhy={ai?.why}
+                              />
+                              {(otherDrafts.length > 0 || (ai && !dismissed)) && (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 28, fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                                  {otherDrafts.length > 0 && (
+                                    <span title="A signal can belong to multiple groups. This one's already selected in other drafts.">
+                                      ⇢ Also selected in: <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{otherDrafts.map(x => x.label).join(", ")}</span>
+                                    </span>
+                                  )}
+                                  <span style={{ flex: 1 }} />
+                                  {ai && !dismissed && (
+                                    <button
+                                      onClick={() => dismissSuggestionInDraft(active.id, s.id)}
+                                      style={{ background: "transparent", border: "none", color: "var(--text-tertiary)", fontSize: 10.5, cursor: "pointer", padding: 0, textDecoration: "underline" }}
+                                    >
+                                      Dismiss suggestion
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Per-draft footer */}
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "10px 18px",
+                  borderTop: "1px solid var(--border)",
+                  background: "var(--bg-sunken)", flexShrink: 0,
+                }}>
+                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                    {active.selectedSignalIds.length === 0
+                      ? "No signals selected — group will start empty."
+                      : `${active.selectedSignalIds.length} signal${active.selectedSignalIds.length === 1 ? "" : "s"} will be added`}
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  <button
+                    onClick={() => removeDraft(active.id)}
+                    style={{ padding: "5px 12px", borderRadius: "var(--radius)", background: "transparent", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500, cursor: "pointer" }}
+                  >
+                    Remove draft
+                  </button>
+                  <button
+                    onClick={() => handleCreateSingle(active.id)}
+                    disabled={!isReady(active)}
+                    title={isReady(active) ? "Create this group only" : "Add a group name first"}
+                    style={{ padding: "5px 14px", borderRadius: "var(--radius)", background: isReady(active) ? "var(--accent)" : "var(--bg-sunken)", color: isReady(active) ? "white" : "var(--text-tertiary)", border: "none", fontSize: 11.5, fontWeight: 600, cursor: isReady(active) ? "pointer" : "default" }}
+                  >
+                    Create this group
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: 13 }}>
+                Pick a draft from the left, or add a new one.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ── ModalSignalRow ─────────────────────────────────────────────────────
 // Rich selectable row used by the New group modal. Shows enough context
 // for the reviewer to actually decide whether this signal belongs in
@@ -7962,7 +8725,7 @@ function NewGroupModalImpl({
 // (one-liner) — driven by the toolbar toggle.
 function ModalSignalRow({
   signal, density, isSelected, onToggle, signalGroups, attachments,
-  aiSuggested, aiWhy,
+  aiSuggested, aiWhy, wipItems,
 }: {
   signal: Signal;
   density: "comfortable" | "compact" | "grid";
@@ -7974,7 +8737,11 @@ function ModalSignalRow({
   // AI-scored matches read distinctly inside the regular Browse list.
   aiSuggested?: boolean;
   aiWhy?: string;
+  // Optional — if passed, the row surfaces a small "⇢ Intent" chip
+  // when this signal is linked to one or more intents.
+  wipItems?: import("@/lib/data").Wip[];
 }) {
+  const linkedIntent = wipItems?.find(w => w.type === "intent" && signal.linkedWip.includes(w.id));
   const reporter = userByIdSafe(signal.author);
   const ownAttachments = attachments.filter(a => a.signalId === signal.id).length;
   const attachmentCount = (signal.screenshots ?? 0) + ownAttachments;
@@ -8077,6 +8844,18 @@ function ModalSignalRow({
             background: "var(--bg-sunken)", border: "1px solid var(--border)",
             borderRadius: 100, padding: "0 7px",
           }}>{signal.status}</span>
+          {linkedIntent && (
+            <span style={{
+              fontSize: 10, fontWeight: 600,
+              color: "#0369a1",
+              background: "rgba(14,165,233,0.10)",
+              border: "1px solid rgba(14,165,233,0.35)",
+              borderRadius: 100, padding: "0 7px",
+              whiteSpace: "nowrap",
+            }} title={`Linked intent: ${linkedIntent.title}`}>
+              ⇢ Intent
+            </span>
+          )}
         </div>
         {/* AI Why-line — only when this row is an AI suggestion */}
         {aiSuggested && aiWhy && (
@@ -8134,7 +8913,7 @@ function ModalSignalRow({
 // source / attachments / multi-group count) is unchanged across both.
 function SuggestedSignalRow({
   signal, density, selected, why, signalGroups, attachments,
-  onAdd, onDismiss, onRemove,
+  onAdd, onDismiss, onRemove, onOpen, wipItems,
 }: {
   signal: Signal;
   density: "comfortable" | "compact" | "grid";
@@ -8146,7 +8925,15 @@ function SuggestedSignalRow({
   onAdd?: () => void;
   onDismiss?: () => void;
   onRemove?: () => void;
+  // Optional inspect action — opens the signal detail without
+  // leaving the modal. The signal modal sits at the page level so
+  // it renders on top of this one.
+  onOpen?: () => void;
+  // Optional Wip list — when passed, the row shows a "⇢ Intent" chip
+  // if the signal is linked to one.
+  wipItems?: import("@/lib/data").Wip[];
 }) {
+  const linkedIntent = wipItems?.find(w => w.type === "intent" && signal.linkedWip.includes(w.id));
   const reporter = userByIdSafe(signal.author);
   const ownAttachments = attachments.filter(a => a.signalId === signal.id).length;
   const attachmentCount = (signal.screenshots ?? 0) + ownAttachments;
@@ -8226,6 +9013,18 @@ function SuggestedSignalRow({
             color: "var(--text-tertiary)", background: "var(--bg-sunken)",
             border: "1px solid var(--border)", borderRadius: 100, padding: "0 7px",
           }}>{signal.status}</span>
+          {linkedIntent && (
+            <span style={{
+              fontSize: 10, fontWeight: 600,
+              color: "#0369a1",
+              background: "rgba(14,165,233,0.10)",
+              border: "1px solid rgba(14,165,233,0.35)",
+              borderRadius: 100, padding: "0 7px",
+              whiteSpace: "nowrap",
+            }} title={`Linked intent: ${linkedIntent.title}`}>
+              ⇢ Intent
+            </span>
+          )}
           {isSuggestion && (
             <span style={{
               fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
@@ -8321,6 +9120,19 @@ function SuggestedSignalRow({
             >
               Dismiss
             </button>
+            {onOpen && (
+              <button
+                onClick={onOpen}
+                title="Open the signal detail (this modal stays open)"
+                style={{
+                  padding: "3px 12px", borderRadius: 100,
+                  background: "transparent", border: "1px solid var(--border)",
+                  color: "var(--text-secondary)", fontSize: 11, fontWeight: 500, cursor: "pointer",
+                }}
+              >
+                Open
+              </button>
+            )}
           </>
         )}
       </div>

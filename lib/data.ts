@@ -515,6 +515,13 @@ export interface Wip {
   // priority (top of the list). Absent rank → falls back to creation /
   // event-log order, matching legacy behaviour.
   order?: number;
+  // ── Draft flag ─────────────────────────────────────────────────────────
+  // When true, the intent is a planning-only draft (captured from a
+  // Weekly Goal or a Group workspace). Draft intents still live on the
+  // Wip board so they're discoverable, but the UI filters them out of
+  // default backlog/sprint views unless the user opts in. Finalizing
+  // simply clears this flag.
+  isDraft?: boolean;
 }
 
 export interface AcceptanceCriterion {
@@ -985,7 +992,12 @@ export interface Feature {
 export interface ProductCapability {
   id: string;
   title: string;
-  featureId: string;            // parent Feature.id
+  // Parent Feature.id. May be an empty string when the capability was
+  // captured from Weekly Goals before its parent was known — the
+  // `needsMapping` flag below marks it so Product View can surface it
+  // in the "Needs mapping" section.
+  featureId: string;
+  needsMapping?: boolean;
   createdAt: string;
 }
 
@@ -999,7 +1011,11 @@ export interface FeatureSlice {
   title: string;
   description?: string;
   status: FeatureStatus;
-  featureId: string;            // parent Feature.id
+  // Parent Feature.id — may be "" when the slice was captured from
+  // Weekly Goals before its parent was known. `needsMapping` flags
+  // it for the Product View "Needs mapping" section.
+  featureId: string;
+  needsMapping?: boolean;
   linkedIntentIds: string[];
   // Capability inclusion: capabilityId → status. A capability that
   // isn't in this map is "not selected" — the slice neither includes

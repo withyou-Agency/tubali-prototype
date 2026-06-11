@@ -761,6 +761,7 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
     updateWeeklyGoal, deleteWeeklyGoal, wipItems, features, featureSlices, productCapabilities,
     releases, themes, toggleThemeGoal,
     toggleGoalIntent, toggleGoalSlice, toggleGoalCapability, setRoute, openWip, setRoadmapFocus,
+    createFeatureSlice, createProductCapability, createDraftIntentFromGoal,
   } = useStore();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(goal.title);
@@ -1063,15 +1064,22 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
           {/* Feature — typed input, persists across goals. */}
           <FeatureInlineEditor goal={goal} />
 
-          {/* Feature slices */}
+          {/* Feature slices — supports typing to create a new draft
+              slice (needsMapping=true, no parent feature required). */}
           <LinkedSection
             title="Slices"
             items={linkedSlices.map(s => {
               const parent = features.find(f => f.id === s.featureId);
               return {
                 id: s.id, label: s.title,
-                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-                onOpen: () => setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id }),
+                right: s.needsMapping ? (
+                  <span style={needsMappingPill()}>Needs mapping</span>
+                ) : parent ? (
+                  <span style={subtleParentPill()}>{parent.title}</span>
+                ) : undefined,
+                onOpen: () => s.featureId
+                  ? setRoadmapFocus({ tab: "product", featureId: s.featureId, sliceId: s.id })
+                  : setRoadmapFocus({ tab: "product" }),
                 onRemove: () => toggleGoalSlice(goal.id, s.id),
               };
             })}
@@ -1079,19 +1087,29 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
               <SlicePicker
                 value={goal.linkedSliceIds}
                 onToggle={(id) => toggleGoalSlice(goal.id, id)}
+                onCreateDraft={(text) => {
+                  const id = createFeatureSlice({ title: text, featureId: "", needsMapping: true });
+                  toggleGoalSlice(goal.id, id);
+                }}
               />
             }
           />
 
-          {/* Product capabilities */}
+          {/* Product capabilities — same typed-create flow as slices. */}
           <LinkedSection
             title="Capabilities"
             items={linkedCapabilities.map(c => {
               const parent = features.find(f => f.id === c.featureId);
               return {
                 id: c.id, label: c.title,
-                right: parent ? <span style={subtleParentPill()}>{parent.title}</span> : undefined,
-                onOpen: () => setRoadmapFocus({ tab: "product", featureId: c.featureId }),
+                right: c.needsMapping ? (
+                  <span style={needsMappingPill()}>Needs mapping</span>
+                ) : parent ? (
+                  <span style={subtleParentPill()}>{parent.title}</span>
+                ) : undefined,
+                onOpen: () => c.featureId
+                  ? setRoadmapFocus({ tab: "product", featureId: c.featureId })
+                  : setRoadmapFocus({ tab: "product" }),
                 onRemove: () => toggleGoalCapability(goal.id, c.id),
               };
             })}
@@ -1099,16 +1117,25 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
               <CapabilityPicker
                 value={goal.linkedCapabilityIds}
                 onToggle={(id) => toggleGoalCapability(goal.id, id)}
+                onCreateDraft={(text) => {
+                  const id = createProductCapability({ title: text, featureId: "", needsMapping: true });
+                  toggleGoalCapability(goal.id, id);
+                }}
               />
             }
           />
 
-          {/* Intents */}
+          {/* Intents — supports typing to create a draft intent that
+              lands in WIP backlog with isDraft=true. All intents
+              listed in one go; drafts get a purple Draft pill so the
+              user can tell at a glance. */}
           <LinkedSection
             title="Intents"
             items={linkedIntents.map(w => ({
               id: w.id, label: w.title,
-              right: <span style={pillStyle(intentColumnAsStatus(w))}>{intentColumnLabel(w)}</span>,
+              right: w.isDraft
+                ? <span style={draftStatusPill()}>Draft</span>
+                : <span style={pillStyle(intentColumnAsStatus(w))}>{intentColumnLabel(w)}</span>,
               onOpen: () => { setRoute("wip"); openWip(w.id); },
               onRemove: () => toggleGoalIntent(goal.id, w.id),
             }))}
@@ -1116,6 +1143,9 @@ function WeeklyGoalCard({ goal, focused }: { goal: WeeklyGoal; focused?: boolean
               <IntentPicker
                 value={goal.linkedIntentIds}
                 onToggle={(id) => toggleGoalIntent(goal.id, id)}
+                onCreateDraft={(text) => {
+                  createDraftIntentFromGoal({ title: text, goalId: goal.id });
+                }}
               />
             }
           />
@@ -1313,6 +1343,32 @@ function GoalReviewSummary({
   );
 }
 
+// Small pill used on slice/capability rows captured from Weekly Goals
+// before a parent feature was assigned. Surfaces in the goal LinkedSection
+// rows AND in Product View's "Needs mapping" section.
+function needsMappingPill(): React.CSSProperties {
+  return {
+    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+    color: "#b45309",
+    background: "rgba(245,158,11,0.10)",
+    border: "1px solid rgba(245,158,11,0.40)",
+    borderRadius: 100, padding: "1px 7px",
+    whiteSpace: "nowrap", textTransform: "uppercase",
+  };
+}
+// Purple pill matching the WIP rail's DRAFT badge so a draft intent
+// reads consistently anywhere it surfaces.
+function draftStatusPill(): React.CSSProperties {
+  return {
+    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+    color: "#7e22ce",
+    background: "rgba(168,85,247,0.10)",
+    border: "1px solid rgba(168,85,247,0.40)",
+    borderRadius: 100, padding: "1px 7px",
+    whiteSpace: "nowrap", textTransform: "uppercase",
+  };
+}
+
 function reviewLabelStyle(): React.CSSProperties {
   return {
     fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
@@ -1437,21 +1493,36 @@ function LinkedSection({
 // ── Pickers — small multi-select popovers ────────────────────────────────
 
 function PickerPopover({
-  options, value, onToggle, label,
+  options, value, onToggle, label, onCreate, createLabel,
 }: {
   options: { id: string; label: string; subtitle?: string }[];
   value: string[];
   onToggle: (id: string) => void;
   label: string;
+  // When provided, the popover shows a search input + a "Create new
+  // draft" affordance once the typed query doesn't match anything.
+  // The created item should be persisted by the caller.
+  onCreate?: (text: string) => void;
+  createLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const ref = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     if (!open) return;
+    setQuery("");
     const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, [open]);
+  const normalized = query.trim().toLowerCase();
+  const filteredOptions = normalized === ""
+    ? options
+    : options.filter(o =>
+        o.label.toLowerCase().includes(normalized) ||
+        (o.subtitle && o.subtitle.toLowerCase().includes(normalized)));
+  const exactMatch = options.find(o => o.label.toLowerCase() === normalized);
+  const canCreate = !!onCreate && normalized.length > 0 && !exactMatch;
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
@@ -1467,58 +1538,112 @@ function PickerPopover({
         onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
         onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
       >
-        <Plus size={10} /> Link
+        <Plus size={10} /> {onCreate ? "Link or create" : "Link"}
       </button>
       {open && (
         <div style={{
           position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
-          width: 280, maxHeight: 280, overflowY: "auto",
+          width: 320, maxHeight: 320, display: "flex", flexDirection: "column",
           background: "var(--bg)", border: "1px solid var(--border)",
           borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
         }}>
           <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)", fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
             {label}
           </div>
-          {options.length === 0 ? (
-            <div style={{ padding: 12, fontSize: "var(--fs-meta)", color: "var(--text-tertiary)", textAlign: "center" }}>
-              Nothing available to link.
-            </div>
-          ) : options.map(opt => {
-            const sel = value.includes(opt.id);
-            return (
+          {onCreate && (
+            <input
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && canCreate) {
+                  onCreate(query.trim());
+                  setQuery("");
+                  setOpen(false);
+                }
+              }}
+              placeholder="Type to search or create a new draft…"
+              style={{
+                margin: "6px 8px",
+                padding: "5px 8px",
+                border: "1px solid var(--border)", borderRadius: "var(--radius)",
+                background: "var(--bg)", color: "var(--text)",
+                fontSize: 12, outline: "none",
+              }}
+              onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+              onBlur={e => (e.target.style.borderColor = "var(--border)")}
+            />
+          )}
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {filteredOptions.length === 0 && !canCreate ? (
+              <div style={{ padding: 12, fontSize: "var(--fs-meta)", color: "var(--text-tertiary)", textAlign: "center" }}>
+                {options.length === 0 ? "Nothing available to link." : "No matches."}
+              </div>
+            ) : filteredOptions.map(opt => {
+              const sel = value.includes(opt.id);
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => onToggle(opt.id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    width: "100%", padding: "6px 10px", textAlign: "left",
+                    background: "transparent", border: "none", cursor: "pointer",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    width: 14, height: 14, borderRadius: 3,
+                    border: sel ? "1.5px solid var(--accent)" : "1.5px solid var(--border-strong)",
+                    background: sel ? "var(--accent)" : "transparent",
+                    flexShrink: 0,
+                  }}>
+                    {sel && <Check size={9} style={{ color: "white" }} />}
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {opt.label}
+                    </div>
+                    {opt.subtitle && (
+                      <div style={{ fontSize: 11, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {opt.subtitle}
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+            {canCreate && (
               <button
-                key={opt.id}
-                onClick={() => onToggle(opt.id)}
+                onClick={() => {
+                  onCreate!(query.trim());
+                  setQuery("");
+                  setOpen(false);
+                }}
                 style={{
                   display: "flex", alignItems: "center", gap: 8,
-                  width: "100%", padding: "6px 10px", textAlign: "left",
-                  background: "transparent", border: "none", cursor: "pointer",
+                  width: "100%", padding: "8px 10px", textAlign: "left",
+                  background: "rgba(168,85,247,0.04)", border: "none",
+                  borderTop: filteredOptions.length > 0 ? "1px solid var(--border)" : "none",
+                  cursor: "pointer",
                 }}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(168,85,247,0.09)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "rgba(168,85,247,0.04)")}
               >
-                <span style={{
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  width: 14, height: 14, borderRadius: 3,
-                  border: sel ? "1.5px solid var(--accent)" : "1.5px solid var(--border-strong)",
-                  background: sel ? "var(--accent)" : "transparent",
-                  flexShrink: 0,
-                }}>
-                  {sel && <Check size={9} style={{ color: "white" }} />}
-                </span>
+                <Plus size={11} style={{ color: "#7e22ce", flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {opt.label}
+                  <div style={{ fontSize: "var(--fs-body)", color: "var(--text)", fontWeight: 500 }}>
+                    {createLabel ?? "Create new draft"}: <span style={{ color: "#7e22ce" }}>&ldquo;{query.trim()}&rdquo;</span>
                   </div>
-                  {opt.subtitle && (
-                    <div style={{ fontSize: 11, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {opt.subtitle}
-                    </div>
-                  )}
+                  <div style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                    Marked as needs-mapping — set its hierarchy later from Product View.
+                  </div>
                 </div>
               </button>
-            );
-          })}
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1733,28 +1858,62 @@ function FeaturePicker({ value, onToggle }: { value: string[]; onToggle: (id: st
   }));
   return <PickerPopover label="Link feature" options={options} value={value} onToggle={onToggle} />;
 }
-function SlicePicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+function SlicePicker({ value, onToggle, onCreateDraft }: { value: string[]; onToggle: (id: string) => void; onCreateDraft?: (text: string) => void }) {
   const { featureSlices, features } = useStore();
   const options = featureSlices.map(s => ({
     id: s.id, label: s.title,
-    subtitle: features.find(f => f.id === s.featureId)?.title,
+    subtitle: s.needsMapping
+      ? "Needs mapping · undefined feature"
+      : features.find(f => f.id === s.featureId)?.title,
   }));
-  return <PickerPopover label="Link feature slice" options={options} value={value} onToggle={onToggle} />;
+  return (
+    <PickerPopover
+      label="Link or create feature slice"
+      options={options}
+      value={value}
+      onToggle={onToggle}
+      onCreate={onCreateDraft}
+      createLabel="Create new draft slice"
+    />
+  );
 }
-function IntentPicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+function IntentPicker({ value, onToggle, onCreateDraft }: { value: string[]; onToggle: (id: string) => void; onCreateDraft?: (text: string) => void }) {
   const { wipItems } = useStore();
   const options = wipItems
     .filter(w => w.type === "intent")
-    .map(w => ({ id: w.id, label: w.title, subtitle: intentColumnLabel(w) }));
-  return <PickerPopover label="Link intent" options={options} value={value} onToggle={onToggle} />;
+    .map(w => ({
+      id: w.id, label: w.title,
+      subtitle: w.isDraft ? "Draft" : intentColumnLabel(w),
+    }));
+  return (
+    <PickerPopover
+      label="Link or create intent"
+      options={options}
+      value={value}
+      onToggle={onToggle}
+      onCreate={onCreateDraft}
+      createLabel="Create new draft intent"
+    />
+  );
 }
-function CapabilityPicker({ value, onToggle }: { value: string[]; onToggle: (id: string) => void }) {
+function CapabilityPicker({ value, onToggle, onCreateDraft }: { value: string[]; onToggle: (id: string) => void; onCreateDraft?: (text: string) => void }) {
   const { productCapabilities, features } = useStore();
   const options = productCapabilities.map(c => ({
     id: c.id, label: c.title,
-    subtitle: features.find(f => f.id === c.featureId)?.title,
+    subtitle: c.needsMapping
+      ? "Needs mapping · undefined feature"
+      : features.find(f => f.id === c.featureId)?.title,
   }));
-  return <PickerPopover label="Link product capability" options={options} value={value} onToggle={onToggle} />;
+  return (
+    <PickerPopover
+      label="Link or create capability"
+      options={options}
+      value={value}
+      onToggle={onToggle}
+      onCreate={onCreateDraft}
+      createLabel="Create new draft capability"
+    />
+  );
 }
 // Picker over the entire weekly-goals timeline. Subtitle shows the week
 // label + status so the user picks the right goal without leaving the
@@ -2419,7 +2578,7 @@ function ProductExplorerView({
         const group = featureGroups.find(g => g.id === f.featureGroupId);
         // Path breadcrumb for features: "Area / Set" (Set is optional).
         const subtitleParts = [
-          area?.title ?? (f.areaId ? "" : "Unassigned features"),
+          area?.title ?? (f.areaId ? "" : "Needs mapping · undefined capability area"),
           group?.title,
         ].filter(Boolean);
         all.push({
@@ -2598,7 +2757,7 @@ function ProductExplorerView({
             { id: "feature",     label: "Features",    count: countsByKind.feature },
             { id: "slice",       label: "Slices",      count: countsByKind.slice },
             { id: "capability",  label: "Capabilities",count: countsByKind.capability },
-            { id: "unassigned",  label: "Unassigned",  count: countsByKind.unassigned },
+            { id: "unassigned",  label: "Needs mapping",  count: countsByKind.unassigned },
           ] as { id: ProductSearchKind; label: string; count: number | null }[]).map(p => {
             const active = typeFilter === p.id;
             return (
@@ -2867,7 +3026,7 @@ function ProductSearchResultsList({
                     border: "1px solid rgba(245,158,11,0.45)",
                     borderRadius: 100, padding: "0 6px",
                   }}>
-                    UNASSIGNED
+                    NEEDS MAPPING
                   </span>
                 )}
               </div>
@@ -3173,34 +3332,117 @@ function GroupTreeBlock({
   );
 }
 
-// "Unassigned features" — the holding bucket for features created from
-// weekly goals (or any feature input) that don't yet belong to a
-// capability area / feature group. Each row is openable AND surfaces an
-// inline "Assign to hierarchy" action; assignment moves the feature out
-// of this bucket without touching its existing goal/intent links.
+// "Needs mapping" — holding bucket for product objects with undefined
+// hierarchy attributes. Objects don't physically MOVE into / out of
+// this bucket; they're surfaced here whenever ANY of their hierarchy
+// attributes is undefined. Setting the missing attribute clears them
+// from this view automatically.
+//
+// Four categories now appear:
+//   • Features missing a capability area
+//   • Features that have an area but no feature set
+//   • Feature Sets missing a capability area
+//   • Slices / Capabilities missing a parent feature
+//
+// Each row spells out exactly WHAT is missing and offers a focused
+// "Set …" action. The section is collapsible so it doesn't dominate
+// the rail when there's work to do everywhere else.
 function UnassignedTreeBlock({
   features, selectedId, onSelect,
 }: {
-  features: Feature[];
+  features: Feature[];                  // features without areaId (passed in)
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const { featureSlices, productCapabilities, featureGroups, features: allFeatures } = useStore();
+  // Features with an area but no feature set — currently render under
+  // their area as "ungrouped". They still need a feature set if the
+  // team's mental model expects one, so we surface them here too.
+  const featuresMissingSet = useMemo(
+    () => allFeatures.filter(f => !!f.areaId && !f.featureGroupId),
+    [allFeatures],
+  );
+  const featureSetsMissingArea = useMemo(
+    () => featureGroups.filter(g => !g.areaId),
+    [featureGroups],
+  );
+  const slicesMissingFeature = useMemo(
+    () => featureSlices.filter(s => !s.featureId),
+    [featureSlices],
+  );
+  const capsMissingFeature = useMemo(
+    () => productCapabilities.filter(c => !c.featureId),
+    [productCapabilities],
+  );
+  const total =
+    features.length +
+    featuresMissingSet.length +
+    featureSetsMissingArea.length +
+    slicesMissingFeature.length +
+    capsMissingFeature.length;
+  const [collapsed, setCollapsed] = useState(false);
+  if (total === 0) return null;
   return (
     <div style={{
       border: "1px dashed var(--border-strong)", borderRadius: "var(--radius)",
       background: "var(--bg-sunken)", padding: "6px 8px",
     }}>
-      <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-        Unassigned · {features.length}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {features.map(f => (
-          <UnassignedFeatureRow key={f.id} feature={f} selectedId={selectedId} onSelect={onSelect} />
-        ))}
-      </div>
-      <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", marginTop: 6, lineHeight: 1.45 }}>
-        Features typed on weekly goals land here. Use <strong style={{ color: "var(--text-secondary)" }}>Assign</strong> to file them under a capability area and feature set — their linked goals and intents are preserved.
-      </div>
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          width: "100%", padding: 0,
+          background: "transparent", border: "none", cursor: "pointer",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+        <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase" }}>
+          Needs mapping · {total}
+        </span>
+      </button>
+      {!collapsed && (
+        <>
+          {features.length > 0 && (
+            <NeedsMappingSection label="Features · missing capability area">
+              {features.map(f => (
+                <UnassignedFeatureRow key={f.id} feature={f} selectedId={selectedId} onSelect={onSelect} />
+              ))}
+            </NeedsMappingSection>
+          )}
+          {featuresMissingSet.length > 0 && (
+            <NeedsMappingSection label="Features · missing feature set">
+              {featuresMissingSet.map(f => (
+                <FeatureNeedsSetRow key={f.id} feature={f} selectedId={selectedId} onSelect={onSelect} />
+              ))}
+            </NeedsMappingSection>
+          )}
+          {featureSetsMissingArea.length > 0 && (
+            <NeedsMappingSection label="Feature sets · missing capability area">
+              {featureSetsMissingArea.map(g => (
+                <FeatureSetNeedsAreaRow key={g.id} group={g} />
+              ))}
+            </NeedsMappingSection>
+          )}
+          {slicesMissingFeature.length > 0 && (
+            <NeedsMappingSection label="Feature slices · missing parent feature">
+              {slicesMissingFeature.map(s => (
+                <SliceNeedsParentRow key={s.id} slice={s} />
+              ))}
+            </NeedsMappingSection>
+          )}
+          {capsMissingFeature.length > 0 && (
+            <NeedsMappingSection label="Capabilities · missing parent feature">
+              {capsMissingFeature.map(c => (
+                <CapabilityNeedsParentRow key={c.id} capability={c} />
+              ))}
+            </NeedsMappingSection>
+          )}
+          <div style={{ fontSize: 10.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.45 }}>
+            Setting a Feature Set automatically infers its Capability Area. Setting a parent Feature on a slice or capability inherits both. Items stay the same record — hierarchy attributes are properties, not folders.
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -3209,6 +3451,246 @@ function UnassignedTreeBlock({
 // pane (so the user can still edit description / capabilities / slices
 // before assignment), while the right-side Assign button opens the
 // assignment dialog without losing the rail context.
+// Sub-section header used inside the Needs mapping block. Keeps the
+// visual structure consistent across the four object-type buckets.
+function NeedsMappingSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 10, fontWeight: 500, color: "var(--text-tertiary)", marginBottom: 3 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Single-select dropdown popover for picking a parent attribute (a
+// capability area for a feature set, or a parent feature for a
+// slice / capability). When the parent's own hierarchy is known, the
+// inference is automatic on confirm — the caller decides what to
+// inherit.
+function SetParentPopover({
+  label, options, onPick,
+}: {
+  label: string;
+  options: { id: string; label: string; subtitle?: string }[];
+  onPick: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={label}
+        style={{
+          padding: "2px 8px", borderRadius: 100,
+          border: "1px solid var(--accent)",
+          background: "var(--bg)", color: "var(--accent)",
+          fontSize: 10.5, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 200,
+          width: 260, maxHeight: 240, overflowY: "auto",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+        }}>
+          {options.length === 0 ? (
+            <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-tertiary)", textAlign: "center" }}>
+              Nothing available to set.
+            </div>
+          ) : options.map(opt => (
+            <button
+              key={opt.id}
+              onClick={() => { onPick(opt.id); setOpen(false); }}
+              style={{
+                display: "flex", flexDirection: "column", gap: 1,
+                width: "100%", padding: "6px 10px", textAlign: "left",
+                background: "transparent", border: "none", cursor: "pointer",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              <span style={{ fontSize: "var(--fs-body)", color: "var(--text)" }}>{opt.label}</span>
+              {opt.subtitle && (
+                <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>{opt.subtitle}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One row per feature that's missing only a feature set (already has
+// an area). Single-click "Set feature set" picks from sets in the
+// SAME area; "+ New set in <area>" creates one inline.
+function FeatureNeedsSetRow({ feature, selectedId, onSelect }: { feature: Feature; selectedId: string | null; onSelect: (id: string) => void }) {
+  const { productAreas, featureGroups, updateFeature, createFeatureGroup } = useStore();
+  const area = productAreas.find(a => a.id === feature.areaId);
+  const setsInArea = featureGroups.filter(g => g.areaId === feature.areaId);
+  const options = setsInArea.map(g => ({ id: g.id, label: g.title }));
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "3px 6px",
+      background: selectedId === feature.id ? "var(--accent-soft)" : "transparent",
+      borderRadius: "var(--radius)",
+    }}>
+      <button
+        onClick={() => onSelect(feature.id)}
+        style={{
+          flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6,
+          background: "transparent", border: "none", padding: 0,
+          cursor: "pointer", textAlign: "left",
+        }}
+      >
+        <span style={pillStyle(feature.status)}>{FEATURE_STATUS_LABEL[feature.status]}</span>
+        <span style={{ flex: 1, minWidth: 0, fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {feature.title}
+        </span>
+        <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+          Area: {area?.title ?? "—"} · <em>missing feature set</em>
+        </span>
+      </button>
+      <SetParentPopover
+        label="Set feature set"
+        options={[
+          ...options,
+          { id: "__new__", label: "+ New feature set in this area" },
+        ]}
+        onPick={(id) => {
+          if (id === "__new__") {
+            const title = window.prompt("New feature set name");
+            if (!title?.trim()) return;
+            const newId = createFeatureGroup({ title: title.trim(), areaId: feature.areaId });
+            updateFeature(feature.id, { featureGroupId: newId });
+          } else {
+            updateFeature(feature.id, { featureGroupId: id });
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+// One row per feature set without a capability area. Picking an area
+// is a single attribute write.
+function FeatureSetNeedsAreaRow({ group }: { group: FeatureGroup }) {
+  const { productAreas, updateFeatureGroup, createProductArea } = useStore();
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "3px 6px",
+    }}>
+      <span style={{ flex: 1, minWidth: 0, fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {group.title}
+      </span>
+      <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+        <em>missing capability area</em>
+      </span>
+      <SetParentPopover
+        label="Set capability area"
+        options={[
+          ...productAreas.map(a => ({ id: a.id, label: a.title })),
+          { id: "__new__", label: "+ New capability area" },
+        ]}
+        onPick={(id) => {
+          if (id === "__new__") {
+            const title = window.prompt("New capability area name");
+            if (!title?.trim()) return;
+            const newId = createProductArea({ title: title.trim() });
+            updateFeatureGroup(group.id, { areaId: newId });
+          } else {
+            updateFeatureGroup(group.id, { areaId: id });
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+// One row per slice missing a parent feature. Picking a parent feature
+// inherits both that feature's areaId and featureGroupId via the
+// existing parent relationship — the slice itself only stores
+// `featureId`, so we just write that. needsMapping clears on save.
+function SliceNeedsParentRow({ slice }: { slice: FeatureSlice }) {
+  const { features, productAreas, featureGroups, updateFeatureSlice } = useStore();
+  const options = features.map(f => {
+    const area = productAreas.find(a => a.id === f.areaId);
+    const set = featureGroups.find(g => g.id === f.featureGroupId);
+    const parts = [area?.title, set?.title].filter(Boolean);
+    return {
+      id: f.id, label: f.title,
+      subtitle: parts.length ? parts.join(" · ") : "Needs mapping",
+    };
+  });
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "3px 6px",
+    }}>
+      <span style={pillStyle(slice.status)}>{FEATURE_STATUS_LABEL[slice.status]}</span>
+      <span style={{ flex: 1, minWidth: 0, fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {slice.title}
+      </span>
+      <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+        <em>missing parent feature</em>
+      </span>
+      <SetParentPopover
+        label="Set parent feature"
+        options={options}
+        onPick={(id) => updateFeatureSlice(slice.id, { featureId: id, needsMapping: false })}
+      />
+    </div>
+  );
+}
+
+// One row per capability missing a parent feature.
+function CapabilityNeedsParentRow({ capability }: { capability: ProductCapability }) {
+  const { features, productAreas, featureGroups, updateProductCapability } = useStore();
+  const options = features.map(f => {
+    const area = productAreas.find(a => a.id === f.areaId);
+    const set = featureGroups.find(g => g.id === f.featureGroupId);
+    const parts = [area?.title, set?.title].filter(Boolean);
+    return {
+      id: f.id, label: f.title,
+      subtitle: parts.length ? parts.join(" · ") : "Needs mapping",
+    };
+  });
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "3px 6px",
+    }}>
+      <span style={{ flex: 1, minWidth: 0, fontSize: "var(--fs-body)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {capability.title}
+      </span>
+      <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+        <em>missing parent feature</em>
+      </span>
+      <SetParentPopover
+        label="Set parent feature"
+        options={options}
+        onPick={(id) => updateProductCapability(capability.id, { featureId: id, needsMapping: false })}
+      />
+    </div>
+  );
+}
+
 function UnassignedFeatureRow({
   feature, selectedId, onSelect,
 }: {
@@ -3264,7 +3746,7 @@ function UnassignedFeatureRow({
       </button>
       <button
         onClick={() => setShowAssign(true)}
-        title="Assign this feature to a capability area + feature set"
+        title="Set the capability area + feature set for this feature"
         style={{
           flexShrink: 0,
           padding: "2px 8px",
@@ -3277,7 +3759,7 @@ function UnassignedFeatureRow({
         onMouseEnter={e => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.color = "var(--accent)"; }}
         onMouseLeave={e => { e.currentTarget.style.background = "var(--bg)"; e.currentTarget.style.color = "var(--text-secondary)"; }}
       >
-        Assign
+        Set area
       </button>
       {showAssign && (
         <AssignFeatureDialog feature={feature} onClose={() => setShowAssign(false)} />
@@ -3390,7 +3872,7 @@ function AssignFeatureDialog({
       >
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
-            Assign to hierarchy
+            Set hierarchy
           </div>
           <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text)", marginTop: 2 }}>
             {feature.title}
@@ -3688,7 +4170,7 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
           Browse view. The feature title repeats below, but the path
           tells the user where it lives. */}
       <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-        {area?.title ?? "Unassigned features"}
+        {area?.title ?? "Needs mapping · undefined capability area"}
         {group && <> {" / "} {group.title}</>}
         {" / "}
         <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{feature.title}</span>
@@ -3717,10 +4199,10 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
         }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: "var(--fs-body)", fontWeight: 600, color: "var(--text)" }}>
-              This feature isn't filed yet.
+              This feature needs mapping.
             </div>
             <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.45, marginTop: 2 }}>
-              Assign it to a capability area and (optionally) a feature set. Linked goals and intents stay attached.
+              Set its capability area and (optionally) feature set. The feature stays the same record — only its hierarchy attributes change. Linked goals and intents are preserved.
             </div>
           </div>
           <button
@@ -3733,7 +4215,7 @@ function FeatureDetailPane({ featureId }: { featureId: string }) {
               whiteSpace: "nowrap",
             }}
           >
-            Assign to hierarchy
+            Set hierarchy
           </button>
         </div>
       )}

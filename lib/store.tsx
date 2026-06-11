@@ -12,7 +12,7 @@ import {
   SPLIT_MAX_PER_SOURCE, splitChildrenCount,
   WeeklyGoal, WeeklyGoalStatus, ProductArea, Feature, FeatureStatus, FeatureSlice,
   FeatureGroup, ProductCapability, SliceCapabilityStatus,
-  Release, ReleaseStatus, RoadmapTheme, MilestoneAuditEntry, MilestoneAuditKind,
+  Release, ReleaseStatus, RoadmapTheme, MilestoneAuditEntry, MilestoneAuditKind, AcceptanceCriterion,
   MoscowPriority, MilestoneObjectKind, milestoneLinkKey,
   SignalGroup, SignalGroupStatus, SignalGroupReason,
   DraftIntent,
@@ -209,7 +209,7 @@ interface StoreActions {
   createFeature:     (input: { title: string; areaId?: string; featureGroupId?: string; description?: string }) => string;
   updateFeature:     (id: string, patch: Partial<Feature>) => void;
   deleteFeature:     (id: string) => void;
-  createFeatureSlice:(input: { title: string; featureId: string; description?: string }) => string;
+  createFeatureSlice:(input: { title: string; featureId: string; description?: string; needsMapping?: boolean }) => string;
   updateFeatureSlice:(id: string, patch: Partial<FeatureSlice>) => void;
   deleteFeatureSlice:(id: string) => void;
   // Link helpers — operate on the relevant array on the target entity.
@@ -230,7 +230,7 @@ interface StoreActions {
   createFeatureGroup:  (input: { title: string; areaId: string }) => string;
   updateFeatureGroup:  (id: string, patch: Partial<FeatureGroup>) => void;
   deleteFeatureGroup:  (id: string) => void;
-  createProductCapability: (input: { title: string; featureId: string }) => string;
+  createProductCapability: (input: { title: string; featureId: string; needsMapping?: boolean }) => string;
   updateProductCapability: (id: string, patch: Partial<ProductCapability>) => void;
   deleteProductCapability: (id: string) => void;
   // ── Release CRUD + linking ───────────────────────────────────────────
@@ -434,6 +434,27 @@ interface StoreActions {
   // the source set (signalIds) when the user drops some rows before
   // confirming. When signalIds is omitted, the live `selection` is used.
   createWorkItem:    (type: WipType, description?: string, assignee?: string | null, opts?: { title?: string; signalIds?: string[] }) => void;
+  // Light-touch creation path for "draft intent from a Weekly Goal" —
+  // no source signal required. Lands in the backlog with isDraft:true
+  // so the WIP rail filter can hide / surface it explicitly.
+  createDraftIntentFromGoal: (input: { title: string; goalId: string }) => string;
+  // Clear the isDraft flag on an intent. Used to finalize a draft.
+  finalizeWipDraft: (wipId: string) => void;
+  // Full-fields draft creation path for the group workspace. Mints a
+  // real Wip with isDraft:true + every selected signal linked +
+  // group reference written to signalGroup.linkedIntentIds.
+  createGroupDraftIntent: (input: {
+    groupId: string;
+    title: string;
+    description?: string;
+    signalIds: string[];
+    notes?: string;
+    acceptanceCriteria?: string[];
+    context?: string;
+    decisionRationale?: string;
+    rejectedAlternatives?: string;
+    plan?: string;
+  }) => string;
   createFromSignal:  (signalId: string, type: WipType, opts?: { description?: string; assignee?: string | null }) => void;
   updateWip:         (id: string, patch: Partial<Wip>) => void;
   // ── Acceptance criteria helpers ─────────────────────────────────────────
@@ -2741,13 +2762,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     })));
   }, [featureSlices, productCapabilities]);
 
-  const createFeatureSlice = useCallback((input: { title: string; featureId: string; description?: string }) => {
+  const createFeatureSlice = useCallback((input: { title: string; featureId: string; description?: string; needsMapping?: boolean }) => {
     const id = newId("slice");
     const slice: FeatureSlice = {
       id, title: input.title.trim() || "Untitled slice",
       description: input.description,
       status: "not_started",
       featureId: input.featureId,
+      needsMapping: input.needsMapping || !input.featureId,
       linkedIntentIds: [],
       createdAt: nowISO(),
     };
@@ -2798,6 +2820,119 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ? { ...g, linkedIntentIds: toggleArrayMember(g.linkedIntentIds, intentId) }
       : g));
   }, []);
+  // ── Draft intent from a Weekly Goal ────────────────────────────────
+  // Creates a real Wip intent in the backlog with isDraft:true and
+  // links it back to the goal in one step. No source signal needed —
+  // planning items often originate without one. The WIP rail's
+  // draft-visibility filter governs whether it surfaces by default.
+  const createDraftIntentFromGoal = useCallback((input: { title: string; goalId: string }) => {
+    const id = `w-${String(wipIdCounter++).padStart(2, "0")}`;
+    const now = nowISO();
+    const newWip: Wip = {
+      id,
+      type: "intent",
+      title: input.title.trim() || "Untitled draft intent",
+      description: "",
+      column: "backlog",
+      location: "backlog",
+      assignee: null,
+      linkedSignals: [],
+      isDraft: true,
+    };
+    setWipItems(prev => [...prev, newWip]);
+    // Link back to the parent goal so it appears in the goal's Linked
+    // intents list immediately.
+    setWeeklyGoals(prev => prev.map(g => g.id === input.goalId
+      ? { ...g, linkedIntentIds: [...g.linkedIntentIds, id] }
+      : g));
+    // Log a creation event so the WIP timeline reflects the new draft.
+    setWipEvents(prev => [...prev, {
+      id: newId("we"),
+      wipId: id,
+      kind: "created",
+      actor: CURRENT_USER_ID,
+      at: now,
+      toColumn: "backlog",
+      toLocation: "backlog",
+    }]);
+    return id;
+  }, []);
+  const finalizeWipDraft = useCallback((wipId: string) => {
+    setWipItems(prev => prev.map(w => w.id === wipId
+      ? { ...w, isDraft: false }
+      : w));
+  }, []);
+  // ── Draft intent from a Signal Group ──────────────────────────────
+  // Parallels createDraftIntentFromGoal but mints a real Wip with
+  // full planning fields (description / AC / context / plan /
+  // rejected alternatives / decision rationale). The new Wip:
+  //   • carries isDraft:true so the WIP rail filter governs visibility,
+  //   • is linked back to the parent group via signalGroup.linkedIntentIds,
+  //   • has every selected signal in its linkedSignals AND each
+  //     signal's linkedWip points back at it.
+  // This is the "draft = normal intent with status Draft" path from
+  // the latest review — replaces the old DraftIntent record approach
+  // for new group-driven drafts. DraftIntent records still render in
+  // the workspace as a legacy surface.
+  const createGroupDraftIntent = useCallback((input: {
+    groupId: string;
+    title: string;
+    description?: string;
+    signalIds: string[];
+    notes?: string;
+    acceptanceCriteria?: string[];
+    context?: string;
+    decisionRationale?: string;
+    rejectedAlternatives?: string;
+    plan?: string;
+  }) => {
+    const id = `w-${String(wipIdCounter++).padStart(2, "0")}`;
+    const now = nowISO();
+    const acItems: AcceptanceCriterion[] = (input.acceptanceCriteria ?? [])
+      .map((t, i) => ({ id: `${id}-ac-${i}`, text: t, done: false }));
+    const newWip: Wip = {
+      id,
+      type: "intent",
+      title: input.title.trim() || "Untitled draft intent",
+      description: input.description ?? "",
+      column: "backlog",
+      location: "backlog",
+      assignee: null,
+      linkedSignals: input.signalIds.slice(),
+      isDraft: true,
+      context: input.context,
+      acceptanceCriteria: acItems.length > 0 ? acItems : undefined,
+      decisionRationale: input.decisionRationale,
+      rejectedAlternatives: input.rejectedAlternatives,
+      plan: input.plan,
+      closeNote: input.notes,
+    };
+    setWipItems(prev => [...prev, newWip]);
+    // Link back to the group so it appears in Related Intents.
+    setSignalGroups(prev => prev.map(g => g.id === input.groupId
+      ? { ...g, linkedIntentIds: [...g.linkedIntentIds, id], updatedAt: now }
+      : g));
+    // Bidirectional link: each source signal references this wip too,
+    // so signals show "⇢ Intent" pills and the wip detail can resolve
+    // its source list.
+    if (input.signalIds.length > 0) {
+      setSignals(prev => prev.map(s =>
+        input.signalIds.includes(s.id)
+          ? { ...s, linkedWip: Array.from(new Set([...s.linkedWip, id])) }
+          : s,
+      ));
+    }
+    setWipEvents(prev => [...prev, {
+      id: newId("we"),
+      wipId: id,
+      kind: "created",
+      actor: CURRENT_USER_ID,
+      at: now,
+      toColumn: "backlog",
+      toLocation: "backlog",
+    }]);
+    return id;
+  }, []);
   const toggleFeatureIntent = useCallback((featureId: string, intentId: string) => {
     setFeatures(prev => prev.map(f => f.id === featureId
       ? { ...f, linkedIntentIds: toggleArrayMember(f.linkedIntentIds, intentId) }
@@ -2841,11 +2976,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }));
   }, []);
 
-  const createProductCapability = useCallback((input: { title: string; featureId: string }) => {
+  const createProductCapability = useCallback((input: { title: string; featureId: string; needsMapping?: boolean }) => {
     const id = newId("cap");
     const cap: ProductCapability = {
       id, title: input.title.trim() || "Untitled capability",
-      featureId: input.featureId, createdAt: nowISO(),
+      featureId: input.featureId,
+      needsMapping: input.needsMapping || !input.featureId,
+      createdAt: nowISO(),
     };
     setProductCapabilities(prev => prev.some(c => c.id === id) ? prev : [...prev, cap]);
     return id;
@@ -3445,6 +3582,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     createFeature, updateFeature, deleteFeature,
     createFeatureSlice, updateFeatureSlice, deleteFeatureSlice,
     toggleGoalFeature, toggleGoalSlice, toggleGoalCapability, toggleGoalIntent,
+    createDraftIntentFromGoal, finalizeWipDraft, createGroupDraftIntent,
     setRoadmapFocus,
     toggleFeatureIntent, toggleFeatureSliceIntent,
     createFeatureGroup, updateFeatureGroup, deleteFeatureGroup,
