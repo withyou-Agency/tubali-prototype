@@ -1782,7 +1782,7 @@ function SelectionBar() {
     selection, clearSelection, bulkSetStatus, bulkAddLabel, signals, createWorkItem, filters,
     signalGroupFilter, signalGroups, removeSignalsFromGroup,
     markSignalsAsDuplicatesOf, closeSignalAsDuplicateOf, linkSignalToWip, wipItems,
-    createDraftIntent, linkGroupToExistingIntent,
+    createDraftIntent, finalizeDraftIntent, linkGroupToExistingIntent,
   } = useStore();
   const [showCreateDraft, setShowCreateDraft] = useState(false);
   // Bulk-split queue — array of signalIds the user wants to split, in
@@ -2227,8 +2227,8 @@ function SelectionBar() {
             groupId={activeGroup.id}
             initialSignalIds={inGroupSelection}
             onClose={() => setShowCreateDraft(false)}
-            onCreate={(input) => {
-              createDraftIntent({
+            onCreate={(input, andFinalize) => {
+              const draftId = createDraftIntent({
                 groupId: activeGroup.id,
                 title: input.title,
                 description: input.description,
@@ -2241,6 +2241,14 @@ function SelectionBar() {
                 rejectedAlternatives: input.rejectedAlternatives,
                 plan: input.plan,
               });
+              if (andFinalize && draftId) {
+                // Save-and-finalize path: mint the real intent right
+                // after the draft so the user gets a non-draft wip on
+                // the Kanban without an extra trip through the group
+                // workspace. The draft row is preserved + stamped
+                // with finalizedWipId so lineage stays intact.
+                finalizeDraftIntent(draftId);
+              }
               clearSelection();
               setShowCreateDraft(false);
             }}
@@ -3361,6 +3369,8 @@ function DraftIntentEditModal(props:
       groupId: string;
       initialSignalIds: string[];
       onClose: () => void;
+      // The second arg lets the user save AND finalize in one click —
+      // creates the draft, then promotes it to a real Wip intent.
       onCreate: (input: {
         title: string;
         description: string;
@@ -3372,7 +3382,7 @@ function DraftIntentEditModal(props:
         decisionRationale: string;
         rejectedAlternatives: string;
         plan: string;
-      }) => void;
+      }, andFinalize: boolean) => void;
     }
   | {
       mode: "edit";
@@ -3469,32 +3479,40 @@ function DraftIntentEditModal(props:
         }}
       >
         <div style={{
-          padding: "14px 16px 10px",
+          padding: "14px 16px 12px",
           borderBottom: "1px solid var(--border)",
           display: "flex", flexDirection: "column", gap: 6,
         }}>
+          {/* Title row — same visual pattern as the normal Create Intent
+              flow: Intent icon + "Create intent" + source count. The
+              DRAFT pill sits on the right (like a status pill on a
+              real intent) so the user knows what they're creating
+              before touching any field. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{
-              fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
-              textTransform: "uppercase", color: "var(--text-tertiary)",
-            }}>
-              {props.mode === "create" ? "New draft intent" : "Edit draft intent"} · {group.name}
+            <Intent size={14} />
+            <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+              {props.mode === "create" ? "Create intent" : "Edit intent"}
             </span>
-            {/* DRAFT badge — same shape and prominence as the badges
-                used on the Drafts row + signal modal. Tells the user
-                at a glance that the same fields the real intent uses
-                are available here, but nothing is on the Kanban yet. */}
+            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+              from {initialIds.length} source signal{initialIds.length === 1 ? "" : "s"}
+            </span>
+            <span style={{ flex: 1 }} />
+            {/* DRAFT status badge — purple to mirror the rail card +
+                visually mark this as an intent with status: Draft. */}
             <span style={{
+              display: "inline-flex", alignItems: "center", gap: 4,
               fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
-              color: "var(--text-tertiary)",
-              background: "var(--bg-sunken)",
-              border: "1px dashed var(--border-strong)",
-              borderRadius: 100, padding: "1px 8px",
+              color: "#7e22ce",
+              background: "rgba(168,85,247,0.10)",
+              border: "1px solid rgba(168,85,247,0.40)",
+              borderRadius: 100, padding: "2px 9px",
               whiteSpace: "nowrap",
-            }}>DRAFT</span>
+            }}>
+              STATUS · DRAFT
+            </span>
           </div>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
-            All the same fields a real intent uses. Capture acceptance criteria, context, decision rationale, alternatives, and a rough plan now — they all copy over verbatim when you click <strong style={{ color: "var(--text-secondary)" }}>Finalize</strong>.
+            Same fields as a real intent — title, summary, acceptance criteria, context, plan, linked signals. Saving keeps it as a <strong style={{ color: "var(--text-secondary)" }}>draft</strong> inside <strong style={{ color: "var(--text-secondary)" }}>{group.name}</strong>; finalize promotes it to a real intent on the Kanban without changing any signal links.
           </div>
         </div>
 
@@ -3676,7 +3694,12 @@ function DraftIntentEditModal(props:
           </div>
         </div>
 
-        <div style={{ padding: "10px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <div style={{ padding: "10px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+          {props.mode === "create" && (
+            <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginRight: "auto" }}>
+              Saved as <strong style={{ color: "var(--text-secondary)" }}>Draft</strong> in this group · finalize promotes it to a real intent on the Kanban
+            </span>
+          )}
           <button
             onClick={props.onClose}
             style={{
@@ -3690,34 +3713,67 @@ function DraftIntentEditModal(props:
             {props.mode === "edit" ? "Done" : "Cancel"}
           </button>
           {props.mode === "create" && (
-            <button
-              onClick={() => {
-                if (!canSubmit) return;
-                props.onCreate({
-                  title: title.trim(),
-                  description,
-                  signalIds,
-                  notes,
-                  suggestedTasks: parseTasks(tasksRaw),
-                  acceptanceCriteria: parseTasks(acRaw),
-                  context,
-                  decisionRationale,
-                  rejectedAlternatives,
-                  plan,
-                });
-              }}
-              disabled={!canSubmit}
-              style={{
-                padding: "6px 14px",
-                background: canSubmit ? "var(--accent)" : "var(--bg-sunken)",
-                color: canSubmit ? "white" : "var(--text-tertiary)",
-                border: "none", borderRadius: "var(--radius)",
-                fontSize: "var(--fs-body)", fontWeight: 600,
-                cursor: canSubmit ? "pointer" : "not-allowed",
-              }}
-            >
-              Create draft
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  if (!canSubmit) return;
+                  props.onCreate({
+                    title: title.trim(),
+                    description,
+                    signalIds,
+                    notes,
+                    suggestedTasks: parseTasks(tasksRaw),
+                    acceptanceCriteria: parseTasks(acRaw),
+                    context,
+                    decisionRationale,
+                    rejectedAlternatives,
+                    plan,
+                  }, false);
+                }}
+                disabled={!canSubmit}
+                title="Save as a draft inside this group — nothing on the Kanban yet"
+                style={{
+                  padding: "6px 14px",
+                  background: canSubmit ? "var(--accent)" : "var(--bg-sunken)",
+                  color: canSubmit ? "white" : "var(--text-tertiary)",
+                  border: "none", borderRadius: "var(--radius)",
+                  fontSize: "var(--fs-body)", fontWeight: 600,
+                  cursor: canSubmit ? "pointer" : "not-allowed",
+                }}
+              >
+                Save draft intent
+              </button>
+              <button
+                onClick={() => {
+                  if (!canSubmit) return;
+                  props.onCreate({
+                    title: title.trim(),
+                    description,
+                    signalIds,
+                    notes,
+                    suggestedTasks: parseTasks(tasksRaw),
+                    acceptanceCriteria: parseTasks(acRaw),
+                    context,
+                    decisionRationale,
+                    rejectedAlternatives,
+                    plan,
+                  }, true);
+                }}
+                disabled={!canSubmit}
+                title="Save the draft AND finalize it immediately — creates a real intent on the Kanban with these fields"
+                style={{
+                  padding: "6px 14px",
+                  background: canSubmit ? "var(--bg)" : "var(--bg-sunken)",
+                  color: canSubmit ? "var(--accent)" : "var(--text-tertiary)",
+                  border: canSubmit ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  borderRadius: "var(--radius)",
+                  fontSize: "var(--fs-body)", fontWeight: 600,
+                  cursor: canSubmit ? "pointer" : "not-allowed",
+                }}
+              >
+                Finalize intent →
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -5035,6 +5091,8 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
     selection, toggleSelect, selectAll, clearSelection,
     openSignal, signalWipLinks,
     draftIntents,
+    removeSignalFromGroup,
+    addSignalsToGroup,
     appMode,
   } = useStore();
   const readOnly = appMode === "client";
@@ -5091,6 +5149,11 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
 
   // Suggest-signals modal — opened from the Signals toolbar.
   const [suggestOpen, setSuggestOpen] = useState(false);
+  // Manual-pick add-signals modal — companion to Suggest signals. Lets
+  // the user browse every signal NOT in the group and add as many as
+  // they want. Critical for empty groups and for adding signals
+  // beyond what AI Suggest surfaces.
+  const [addSignalsOpen, setAddSignalsOpen] = useState(false);
 
   if (!group) {
     // Filter pointed at a deleted group — bounce back to Signals.
@@ -5402,7 +5465,70 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
           member signal list with checkboxes (uses the existing ListView).
           RIGHT (side, flex 1): reasons + group notes. */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-        <main style={{ flex: 2, minWidth: 0, overflowY: "auto", padding: "16px 20px 88px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <main style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "16px 20px 88px", display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Group notes — moved to the top so the user reads "what
+              connects these signals" BEFORE diving into the signal
+              list. Persistent + scoped to the group. */}
+          <div style={{
+            padding: "10px 14px",
+            border: "1px solid var(--border)", borderRadius: "var(--radius)",
+            background: "var(--bg)",
+            display: "flex", flexDirection: "column", gap: 6,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)" }}>
+                Group notes
+              </span>
+              <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                · persistent, scoped to this group
+              </span>
+            </div>
+            {editingNotes ? (
+              <textarea
+                autoFocus
+                value={notesDraft}
+                onChange={e => setNotesDraft(e.target.value)}
+                onBlur={() => { updateSignalGroup(group.id, { notes: notesDraft }); setEditingNotes(false); }}
+                rows={3}
+                placeholder="What's the connection between these signals? Decisions, hypotheses, what to watch for…"
+                style={{
+                  width: "100%", boxSizing: "border-box",
+                  padding: "8px 10px",
+                  border: "1px solid var(--accent)", borderRadius: "var(--radius)",
+                  background: "var(--bg)", color: "var(--text)",
+                  fontSize: "var(--fs-body)", lineHeight: 1.55, outline: "none",
+                  resize: "vertical",
+                }}
+              />
+            ) : group.notes ? (
+              <button
+                onClick={() => { setNotesDraft(group.notes ?? ""); setEditingNotes(true); }}
+                style={{
+                  width: "100%", textAlign: "left",
+                  padding: "8px 10px", border: "1px solid var(--border)",
+                  borderRadius: "var(--radius)", background: "var(--bg-sunken)",
+                  color: "var(--text-secondary)", fontSize: "var(--fs-body)", lineHeight: 1.55,
+                  cursor: "text",
+                }}
+                title="Click to edit notes"
+              >
+                {group.notes}
+              </button>
+            ) : (
+              <button
+                onClick={() => { setNotesDraft(""); setEditingNotes(true); }}
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "5px 10px", fontSize: 11, color: "var(--text-tertiary)",
+                  background: "transparent", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius)",
+                  cursor: "pointer",
+                }}
+              >
+                + Add notes
+              </button>
+            )}
+          </div>
+
           {/* Drafts + finalized intents — reuses the same block from the
               roadmap workspace so the user sees draft-intent state here. */}
           <GroupWorkspaceIntentsBlock group={group} />
@@ -5442,20 +5568,36 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
               })()}
               <span style={{ flex: 1 }} />
               {!readOnly && (
-                <button
-                  onClick={() => setSuggestOpen(true)}
-                  title="Let the system suggest signals that match this group's context"
-                  style={{
-                    padding: "3px 10px", borderRadius: 100,
-                    background: "var(--bg)", border: "1px solid var(--border)",
-                    color: "var(--text-secondary)", fontSize: 11, fontWeight: 500,
-                    cursor: "pointer", whiteSpace: "nowrap",
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
-                  onMouseLeave={e => (e.currentTarget.style.background = "var(--bg)")}
-                >
-                  ✦ Suggest signals
-                </button>
+                <>
+                  <button
+                    onClick={() => setAddSignalsOpen(true)}
+                    title="Browse every signal and add the ones you want to this group"
+                    style={{
+                      padding: "3px 10px", borderRadius: 100,
+                      background: "var(--bg)", border: "1px solid var(--border)",
+                      color: "var(--text-secondary)", fontSize: 11, fontWeight: 500,
+                      cursor: "pointer", whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "var(--bg)")}
+                  >
+                    + Add signals
+                  </button>
+                  <button
+                    onClick={() => setSuggestOpen(true)}
+                    title="Let the system suggest signals that match this group's context"
+                    style={{
+                      padding: "3px 10px", borderRadius: 100,
+                      background: "var(--bg)", border: "1px solid var(--border)",
+                      color: "var(--text-secondary)", fontSize: 11, fontWeight: 500,
+                      cursor: "pointer", whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "var(--bg)")}
+                  >
+                    ✦ Suggest signals
+                  </button>
+                </>
               )}
               {/* Group-by — visual bucketing only; never creates saved groups. */}
               <select
@@ -5539,22 +5681,32 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
                   </div>
                 )}
               </div>
-              {/* View mode toggle */}
+              {/* View mode toggle. Compare is only useful when 2–4
+                  signals are selected; the button is dimmed otherwise
+                  and a hint appears below the toolbar instead of an
+                  empty Compare view. */}
+              {(() => {
+                const memberIds = memberSignals.map(s => s.id);
+                const selectedInGroup = memberIds.filter(id => selection.includes(id)).length;
+                const compareReady = selectedInGroup >= 2 && selectedInGroup <= 4;
+                return (
               <div style={{ display: "inline-flex", gap: 2, background: "var(--bg-sunken)", borderRadius: 100, padding: 2 }}>
                 {(["list", "cards", "compare"] as const).map(m => {
                   const active = viewMode === m;
+                  const dimmed = m === "compare" && !compareReady && viewMode !== "compare";
                   return (
                     <button
                       key={m}
                       onClick={() => setViewMode(m)}
-                      title={m === "list" ? "Compact rows" : m === "cards" ? "Card grid" : "Side-by-side comparison"}
+                      title={m === "list" ? "Compact rows" : m === "cards" ? "Card grid" : "Side-by-side comparison — select 2 to 4 signals first"}
                       style={{
                         padding: "3px 10px", borderRadius: 100, border: "none",
                         background: active ? "var(--bg)" : "transparent",
-                        color: active ? "var(--text)" : "var(--text-secondary)",
+                        color: dimmed ? "var(--text-tertiary)" : active ? "var(--text)" : "var(--text-secondary)",
                         fontSize: 11, fontWeight: 500, cursor: "pointer",
                         boxShadow: active ? "var(--shadow-sm)" : undefined,
                         textTransform: "capitalize",
+                        opacity: dimmed ? 0.6 : 1,
                       }}
                     >
                       {m}
@@ -5562,6 +5714,8 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
                   );
                 })}
               </div>
+                );
+              })()}
               {!readOnly && memberSignals.length > 0 && (() => {
                 const visibleIds = filteredSignals.map(s => s.id);
                 const allSelected = visibleIds.length > 0 && visibleIds.every(id => selection.includes(id));
@@ -5656,11 +5810,39 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
               behave identically across modes. */}
           {memberSignals.length === 0 ? (
             <div style={{
-              padding: 24, textAlign: "center", border: "1px dashed var(--border)",
+              padding: "24px 18px", textAlign: "center", border: "1px dashed var(--border)",
               borderRadius: "var(--radius)", background: "var(--bg)",
               color: "var(--text-tertiary)", fontSize: "var(--fs-body)", lineHeight: 1.5,
+              display: "flex", flexDirection: "column", gap: 12, alignItems: "center",
             }}>
-              This group has no signals yet. Use the SelectionBar's <strong style={{ color: "var(--text-secondary)" }}>Save as group</strong> action to add some, or open another signal and use its <em>Groups</em> section to attach it here.
+              <div>This group has no signals yet. Add some manually or let the system suggest a starter set.</div>
+              {!readOnly && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+                  <button
+                    onClick={() => setAddSignalsOpen(true)}
+                    style={{
+                      padding: "5px 12px", borderRadius: "var(--radius)",
+                      background: "var(--accent)", color: "white",
+                      border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                    }}
+                  >
+                    + Add signals
+                  </button>
+                  <button
+                    onClick={() => setSuggestOpen(true)}
+                    style={{
+                      padding: "5px 12px", borderRadius: "var(--radius)",
+                      background: "var(--bg)", color: "var(--text-secondary)",
+                      border: "1px solid var(--border)", fontSize: 11.5, fontWeight: 500, cursor: "pointer",
+                    }}
+                  >
+                    ✦ Suggest signals
+                  </button>
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
+                You can also select signals on the Signals list and use <strong style={{ color: "var(--text-secondary)" }}>Save as group</strong> in the selection bar.
+              </div>
             </div>
           ) : filteredSignals.length === 0 ? (
             <div style={{
@@ -5704,6 +5886,7 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
                       checked={selection.includes(s.id)}
                       onToggle={() => toggleSelect(s.id)}
                       onOpen={() => openSignal(s.id)}
+                      onRemove={() => removeSignalFromGroup(group.id, s.id)}
                       readOnly={readOnly}
                       wipItems={wipItems}
                       duplicateGroups={duplicateGroups}
@@ -5720,8 +5903,8 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
           ) : viewMode === "cards" ? (
             <div style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-              gap: 10, alignItems: "start",
+              gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+              gap: 12, alignItems: "stretch",
             }}>
               {filteredSignals.map(s => (
                 <GroupSignalCard
@@ -5730,6 +5913,7 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
                   checked={selection.includes(s.id)}
                   onToggle={() => toggleSelect(s.id)}
                   onOpen={() => openSignal(s.id)}
+                  onRemove={() => removeSignalFromGroup(group.id, s.id)}
                   readOnly={readOnly}
                   wipItems={wipItems}
                   duplicateGroups={duplicateGroups}
@@ -5740,134 +5924,67 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
                 />
               ))}
             </div>
-          ) : (
-            // viewMode === "compare"
-            <div style={{
-              display: "flex", gap: 12, alignItems: "stretch",
-              overflowX: "auto", overflowY: "hidden",
-              padding: "4px 4px 12px",
-              scrollbarWidth: "thin" as const,
-            }}>
-              {filteredSignals.map(s => (
-                <GroupSignalCompareTile
-                  key={s.id}
-                  signal={s}
-                  checked={selection.includes(s.id)}
-                  onToggle={() => toggleSelect(s.id)}
-                  onOpen={() => openSignal(s.id)}
-                  readOnly={readOnly}
-                  wipItems={wipItems}
-                  duplicateGroups={duplicateGroups}
-                  signalWipLinks={signalWipLinks}
-                  attachments={signalAttachments}
-                  signalGroups={signalGroups}
-                  currentGroupId={group.id}
-                />
-              ))}
-            </div>
-          )}
+          ) : (() => {
+            // viewMode === "compare" — restricted to 2–4 selected
+            // member signals so the side-by-side actually IS a
+            // comparison. Otherwise the mode shows a guidance card
+            // instead of a generic empty grid.
+            const selectedMemberSignals = filteredSignals.filter(s => selection.includes(s.id));
+            const inRange = selectedMemberSignals.length >= 2 && selectedMemberSignals.length <= 4;
+            if (!inRange) {
+              return (
+                <div style={{
+                  padding: "20px 18px", textAlign: "center",
+                  border: "1px dashed var(--border)", borderRadius: "var(--radius)",
+                  background: "var(--bg)",
+                  fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.6,
+                }}>
+                  <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+                    Select 2 to 4 signals to compare
+                  </div>
+                  You currently have <strong style={{ color: "var(--text)" }}>{selectedMemberSignals.length}</strong> selected. Pick at least 2 (and at most 4) from the list to see them side by side.
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      onClick={() => setViewMode("list")}
+                      style={{
+                        padding: "4px 12px", borderRadius: 100,
+                        background: "transparent", border: "1px solid var(--border)",
+                        color: "var(--text-secondary)", fontSize: 11, fontWeight: 500, cursor: "pointer",
+                      }}
+                    >
+                      ← Back to list
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${selectedMemberSignals.length}, minmax(260px, 1fr))`,
+                gap: 12, alignItems: "stretch",
+              }}>
+                {selectedMemberSignals.map(s => (
+                  <GroupSignalCompareTile
+                    key={s.id}
+                    signal={s}
+                    checked={selection.includes(s.id)}
+                    onToggle={() => toggleSelect(s.id)}
+                    onOpen={() => openSignal(s.id)}
+                    onRemove={() => removeSignalFromGroup(group.id, s.id)}
+                    readOnly={readOnly}
+                    wipItems={wipItems}
+                    duplicateGroups={duplicateGroups}
+                    signalWipLinks={signalWipLinks}
+                    attachments={signalAttachments}
+                    signalGroups={signalGroups}
+                    currentGroupId={group.id}
+                  />
+                ))}
+              </div>
+            );
+          })()}
         </main>
-
-        {/* Side panel — reasons + notes + the small "what is a group"
-            explainer. */}
-        <aside style={{
-          flex: 1, minWidth: 320, maxWidth: 380,
-          borderLeft: "1px solid var(--border)",
-          background: "var(--bg)",
-          overflowY: "auto",
-          padding: "16px 18px 24px",
-          display: "flex", flexDirection: "column", gap: 14,
-        }}>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 6 }}>
-              Reasons
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-              {(Object.keys(SIGNAL_GROUP_REASON_LABEL) as SignalGroupReason[]).map(r => {
-                const on = group.reasons.includes(r);
-                return (
-                  <button
-                    key={r}
-                    onClick={() => toggleReason(r)}
-                    style={{
-                      padding: "2px 9px", borderRadius: 100,
-                      border: on ? "1px solid var(--accent)" : "1px solid var(--border)",
-                      background: on ? "var(--accent-soft)" : "var(--bg)",
-                      color: on ? "var(--accent)" : "var(--text-tertiary)",
-                      fontSize: 10.5, fontWeight: 500, cursor: "pointer",
-                    }}
-                  >
-                    {SIGNAL_GROUP_REASON_LABEL[r]}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-              Group notes <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· persistent, scoped to this group</span>
-            </div>
-            {editingNotes ? (
-              <textarea
-                autoFocus
-                value={notesDraft}
-                onChange={e => setNotesDraft(e.target.value)}
-                onBlur={() => { updateSignalGroup(group.id, { notes: notesDraft }); setEditingNotes(false); }}
-                rows={5}
-                placeholder="What's the connection between these signals?"
-                style={{
-                  width: "100%", boxSizing: "border-box",
-                  padding: "8px 10px",
-                  border: "1px solid var(--accent)", borderRadius: "var(--radius)",
-                  background: "var(--bg)", color: "var(--text)",
-                  fontSize: "var(--fs-body)", lineHeight: 1.55, outline: "none",
-                  resize: "vertical",
-                }}
-              />
-            ) : group.notes ? (
-              <button
-                onClick={() => { setNotesDraft(group.notes ?? ""); setEditingNotes(true); }}
-                style={{
-                  width: "100%", textAlign: "left",
-                  padding: "8px 10px", border: "1px solid var(--border)",
-                  borderRadius: "var(--radius)", background: "var(--bg-sunken)",
-                  color: "var(--text-secondary)", fontSize: "var(--fs-body)", lineHeight: 1.55,
-                  cursor: "text",
-                }}
-                title="Click to edit notes"
-              >
-                {group.notes}
-              </button>
-            ) : (
-              <button
-                onClick={() => { setNotesDraft(""); setEditingNotes(true); }}
-                style={{
-                  padding: "5px 10px", fontSize: 11, color: "var(--text-tertiary)",
-                  background: "transparent", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius)",
-                  cursor: "pointer",
-                }}
-              >
-                + Add notes
-              </button>
-            )}
-          </div>
-
-          {/* Tiny explainer — kept in the side panel so the main list
-              doesn't carry it on every group. */}
-          <div style={{
-            padding: "10px 12px",
-            borderRadius: "var(--radius)",
-            background: "var(--bg-sunken)",
-            border: "1px dashed var(--border)",
-            fontSize: 10.5, color: "var(--text-tertiary)", lineHeight: 1.55,
-          }}>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", marginBottom: 4 }}>
-              About this workspace
-            </div>
-            A group is a persistent workspace for reviewing related signals together. Bulk actions on the SelectionBar (status, duplicates, link to intent, draft intent, remove from group) operate on the selected member signals. Closing this workspace returns you to the Signals list — the group, its notes, and any actions you took stay saved.
-          </div>
-        </aside>
       </div>
 
       {/* SelectionBar — the same one used on the standard Signals page.
@@ -5878,6 +5995,16 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
       {suggestOpen && (
         <SuggestSignalsModal group={group} onClose={() => setSuggestOpen(false)} />
       )}
+      {addSignalsOpen && (
+        <AddSignalsModal
+          group={group}
+          onClose={() => setAddSignalsOpen(false)}
+          onAdd={(ids) => {
+            if (ids.length > 0) addSignalsToGroup(group.id, ids);
+            setAddSignalsOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -5887,7 +6014,7 @@ function SignalGroupWorkspaceView({ groupId }: { groupId: string }) {
 // list. Keeps the UI deliberately different from the standard Signals
 // cards so the user can tell at a glance they're in a different mode.
 function GroupSignalRow({
-  signal, checked, onToggle, onOpen, readOnly,
+  signal, checked, onToggle, onOpen, onRemove, readOnly,
   wipItems, duplicateGroups, signalWipLinks, attachments,
   signalGroups, currentGroupId,
   displayFields,
@@ -5896,6 +6023,9 @@ function GroupSignalRow({
   checked: boolean;
   onToggle: () => void;
   onOpen: () => void;
+  // Remove this single signal from the current group's signalIds.
+  // Does not touch the signal record itself.
+  onRemove?: () => void;
   readOnly: boolean;
   wipItems: import("@/lib/data").Wip[];
   duplicateGroups: import("@/lib/data").DuplicateGroup[];
@@ -6104,6 +6234,24 @@ function GroupSignalRow({
             }}>
               {signal.status}
             </span>
+            {!readOnly && onRemove && (
+              <button
+                onClick={onRemove}
+                aria-label="Remove from group"
+                title="Remove this signal from the group (signal is preserved)"
+                style={{
+                  padding: "3px 4px",
+                  border: "none", background: "transparent",
+                  color: "var(--text-tertiary)", cursor: "pointer",
+                  borderRadius: "var(--radius-sm)",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--danger, #b91c1c)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+              >
+                <X size={10} />
+              </button>
+            )}
             <button
               onClick={() => setExpanded(e => !e)}
               aria-label={expanded ? "Collapse details" : "Expand details"}
@@ -6641,7 +6789,7 @@ function workspaceFilterSelect(active: boolean): React.CSSProperties {
 // description, priority, owner, age, attachments, and badges all read
 // at a glance without expanding.
 function GroupSignalCard({
-  signal, checked, onToggle, onOpen, readOnly,
+  signal, checked, onToggle, onOpen, onRemove, readOnly,
   wipItems, duplicateGroups, signalWipLinks, attachments,
   signalGroups, currentGroupId,
 }: {
@@ -6649,6 +6797,7 @@ function GroupSignalCard({
   checked: boolean;
   onToggle: () => void;
   onOpen: () => void;
+  onRemove?: () => void;
   readOnly: boolean;
   wipItems: import("@/lib/data").Wip[];
   duplicateGroups: import("@/lib/data").DuplicateGroup[];
@@ -6704,6 +6853,23 @@ function GroupSignalCard({
           borderRadius: 100, padding: "1px 8px",
           whiteSpace: "nowrap",
         }}>{signal.status}</span>
+        {!readOnly && onRemove && (
+          <button
+            onClick={onRemove}
+            aria-label="Remove from group"
+            title="Remove this signal from the group (signal is preserved)"
+            style={{
+              padding: 4, color: "var(--text-tertiary)",
+              background: "transparent", border: "none", cursor: "pointer",
+              borderRadius: "var(--radius-sm)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--danger, #b91c1c)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+          >
+            <X size={10} />
+          </button>
+        )}
       </div>
       <button
         onClick={onOpen}
@@ -6783,7 +6949,7 @@ function cardBadgeStyle(kind: "neutral" | "intent" | "dup" | "dup-main"): React.
 // user can read several signals next to each other without opening
 // modals. The parent container is horizontally scrollable.
 function GroupSignalCompareTile({
-  signal, checked, onToggle, onOpen, readOnly,
+  signal, checked, onToggle, onOpen, onRemove, readOnly,
   wipItems, duplicateGroups, signalWipLinks, attachments,
   signalGroups, currentGroupId,
 }: {
@@ -6791,6 +6957,7 @@ function GroupSignalCompareTile({
   checked: boolean;
   onToggle: () => void;
   onOpen: () => void;
+  onRemove?: () => void;
   readOnly: boolean;
   wipItems: import("@/lib/data").Wip[];
   duplicateGroups: import("@/lib/data").DuplicateGroup[];
@@ -6821,8 +6988,8 @@ function GroupSignalCompareTile({
   const pp = priorityPalette[signal.priority];
   return (
     <div style={{
-      flexShrink: 0,
-      width: 320,
+      // Compare tiles now sit in a CSS grid (parent is grid-template
+      // -columns with N tracks), so they no longer need fixed width.
       maxHeight: "calc(100vh - 260px)",
       overflowY: "auto",
       padding: "14px 14px 14px 16px",
@@ -6859,6 +7026,23 @@ function GroupSignalCompareTile({
           borderRadius: 100, padding: "1px 8px",
           whiteSpace: "nowrap",
         }}>{signal.status}</span>
+        {!readOnly && onRemove && (
+          <button
+            onClick={onRemove}
+            aria-label="Remove from group"
+            title="Remove this signal from the group (signal is preserved)"
+            style={{
+              padding: 4, color: "var(--text-tertiary)",
+              background: "transparent", border: "none", cursor: "pointer",
+              borderRadius: "var(--radius-sm)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--danger, #b91c1c)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-tertiary)"; }}
+          >
+            <X size={10} />
+          </button>
+        )}
       </div>
       <button
         onClick={onOpen}
@@ -6993,16 +7177,41 @@ function NewGroupModal({
   onClose: () => void;
   onConfirm: (input: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }) => void;
 }) {
-  const { signals, signalGroups } = useStore();
+  return <NewGroupModalImpl onClose={onClose} onConfirm={onConfirm} />;
+}
+
+// Priority palette reused inside the modal — same colors the workspace
+// uses on GroupSignalRow so the user sees consistent pill styling
+// before and after creating the group.
+const _PRIORITY_PALETTE: Record<SignalPriority, { bg: string; fg: string; bd: string }> = {
+  urgent: { bg: "rgba(239,68,68,0.10)",  fg: "#b91c1c", bd: "rgba(239,68,68,0.40)" },
+  high:   { bg: "rgba(245,158,11,0.10)", fg: "#b45309", bd: "rgba(245,158,11,0.40)" },
+  medium: { bg: "rgba(59,130,246,0.10)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.40)" },
+  low:    { bg: "var(--bg-sunken)",      fg: "var(--text-secondary)", bd: "var(--border)" },
+};
+
+function NewGroupModalImpl({
+  onClose, onConfirm,
+}: {
+  onClose: () => void;
+  onConfirm: (input: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }) => void;
+}) {
+  const { signals, signalGroups, signalAttachments } = useStore();
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [reasons, setReasons] = useState<SignalGroupReason[]>([]);
+  const [reasonsOpen, setReasonsOpen] = useState(false);
   const [selectedSignalIds, setSelectedSignalIds] = useState<Set<string>>(new Set());
-  const [tab, setTab] = useState<"pick" | "ai">("pick");
   const [pickQuery, setPickQuery] = useState("");
-  // Which AI suggestion (if any) is expanded — only one at a time so
+  const [density, setDensity] = useState<"comfortable" | "compact" | "grid">("comfortable");
+  // Which AI cluster (if any) is expanded — only one at a time so
   // the modal doesn't get tall.
   const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
+  // Single source-of-adds toggle — instead of having both panels open
+  // at once (which crowded the modal), the user picks one mode at a
+  // time. "browse" is the default since AI suggestions already weave
+  // into the browse list via the AI SUGGESTED pill.
+  const [addSource, setAddSource] = useState<"browse" | "ideas">("browse");
 
   const canConfirm = name.trim().length > 0;
   const toggleReason = (r: SignalGroupReason) =>
@@ -7049,9 +7258,14 @@ function NewGroupModal({
     id: string;
     name: string;
     notes: string;
+    why: string;                         // human-readable explanation
+    confidence: "high" | "medium" | "low";
     reasons: SignalGroupReason[];
     signalIds: string[];
   };
+  // Confidence helper — pure heuristic on cluster size.
+  const confFromSize = (n: number): "high" | "medium" | "low" =>
+    n >= 6 ? "high" : n >= 4 ? "medium" : "low";
   const suggestions: Suggestion[] = useMemo(() => {
     const out: Suggestion[] = [];
     const STOP = new Set(["the","and","with","that","this","from","into","when","where","what","have","been","were","over","under","need","needs","also","just","very","more","less","like","make","made","please","still","again","while","about","cannot","doesnt","doesn","could","would","should","since","there","their","than","then","these","those","such","each","other","onto","upon","does","done","much","most","some","only","seem","seems"]);
@@ -7079,6 +7293,8 @@ function NewGroupModal({
         id: `kw-${word}`,
         name: `${cap}-related feedback`,
         notes: `Signals mentioning "${word}" that aren't yet in any group.`,
+        why: `${idSet.size} ungrouped signals share the keyword “${word}” in their title or description.`,
+        confidence: confFromSize(idSet.size),
         reasons: ["same_theme"],
         signalIds: Array.from(idSet).slice(0, 12),
       });
@@ -7089,6 +7305,8 @@ function NewGroupModal({
         id: "feedback-unread",
         name: "Unread feedback signals",
         notes: "Ungrouped feedback that hasn't been triaged yet.",
+        why: `${feedbackUnread.length} feedback signals are still new and not in any group — worth a triage sweep.`,
+        confidence: confFromSize(feedbackUnread.length),
         reasons: ["other"],
         signalIds: feedbackUnread.map(s => s.id).slice(0, 20),
       });
@@ -7103,6 +7321,8 @@ function NewGroupModal({
         id: "stale",
         name: "Stale signals to review",
         notes: "Signals over 2 weeks old that haven't been acted on.",
+        why: `${stale.length} signals are older than 2 weeks and still in “new” — likely worth grouping for a sweep.`,
+        confidence: confFromSize(stale.length),
         reasons: ["same_action"],
         signalIds: stale.map(s => s.id).slice(0, 20),
       });
@@ -7120,6 +7340,107 @@ function NewGroupModal({
     }
     return filtered.slice(0, 6);
   }, [ungroupedSignals]);
+
+  // ── Per-signal AI suggestions ──────────────────────────────────────
+  // Hybrid mode core: every time the group's identity OR the staging
+  // selection changes, score every non-selected, non-dismissed signal
+  // by lexical overlap against:
+  //   • the group name
+  //   • the context/notes
+  //   • the reason labels (so "same client" adds "client" to the bag)
+  //   • the TITLES of the signals already in the staging set
+  // Top 10 signals (by score > 0) surface with a Why-it-fits line.
+  type SuggestedSignal = { signal: Signal; score: number; why: string };
+  const perSignalSuggestions: SuggestedSignal[] = useMemo(() => {
+    const STOP = new Set(["the","and","with","that","this","from","into","when","where","what","have","been","were","over","under","need","needs","also","just","very","more","less","like","make","made","please","still","again","while","about","cannot","doesnt","doesn","could","would","should","since","there","their","than","then","these","those","such","each","other","onto","upon","does","done","much","most","some","only","seem","seems","feedback","note"]);
+    const tokenize = (text: string): string[] => {
+      const toks = text.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+      return toks.filter(t => !STOP.has(t));
+    };
+    const bag = new Map<string, "name" | "context" | "reason" | "selected">();
+    const addTokens = (text: string, source: "name" | "context" | "reason" | "selected") => {
+      for (const t of tokenize(text)) {
+        if (!bag.has(t)) bag.set(t, source);
+      }
+    };
+    addTokens(name, "name");
+    addTokens(notes, "context");
+    for (const r of reasons) addTokens(SIGNAL_GROUP_REASON_LABEL[r], "reason");
+    const selectedSignalsList = signals.filter(s => selectedSignalIds.has(s.id));
+    for (const s of selectedSignalsList) addTokens(s.title, "selected");
+    if (bag.size === 0) return []; // nothing to match against
+
+    const out: SuggestedSignal[] = [];
+    for (const s of signals) {
+      if (selectedSignalIds.has(s.id)) continue;
+      const text = (s.title + " " + (s.description ?? "")).toLowerCase();
+      let score = 0;
+      const matched: { token: string; source: "name" | "context" | "reason" | "selected" }[] = [];
+      bag.forEach((source, t) => {
+        if (text.includes(t)) {
+          score += source === "name" ? 4 : source === "selected" ? 3 : source === "reason" ? 2 : 2;
+          matched.push({ token: t, source });
+        }
+      });
+      if (score <= 0) continue;
+      // Why-it-fits: name keyword > selected-overlap > reason > context.
+      const nameMatch = matched.find(m => m.source === "name");
+      const selectedMatch = matched.filter(m => m.source === "selected").length;
+      const reasonMatch = matched.find(m => m.source === "reason");
+      let why = "";
+      if (nameMatch) why = `Matches the group name keyword "${nameMatch.token}".`;
+      else if (selectedMatch > 0) why = `Shares ${selectedMatch} keyword${selectedMatch === 1 ? "" : "s"} with your selected signals.`;
+      else if (reasonMatch) why = `Matches reason keyword "${reasonMatch.token}".`;
+      else why = `Matches keyword "${matched[0].token}" from the group context.`;
+      out.push({ signal: s, score, why });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out;
+  }, [name, notes, reasons, selectedSignalIds, signals]);
+
+  // Lookup: signal id → AI-suggestion metadata. Used by the Browse all
+  // list to surface the AI-suggested pill + Why-line on rows that the
+  // scorer matched.
+  const aiSuggestionById = useMemo(() => {
+    const map = new Map<string, { score: number; why: string }>();
+    for (const s of perSignalSuggestions) map.set(s.signal.id, { score: s.score, why: s.why });
+    return map;
+  }, [perSignalSuggestions]);
+
+  const addSuggestedSignal = (id: string) => setSelectedSignalIds(prev => {
+    const next = new Set(prev); next.add(id); return next;
+  });
+  const removeSelectedSignal = (id: string) => setSelectedSignalIds(prev => {
+    const next = new Set(prev); next.delete(id); return next;
+  });
+
+  // The selected signals as full records (in selection order — using
+  // signal id ordering for stability).
+  const selectedSignalsList = useMemo(
+    () => signals.filter(s => selectedSignalIds.has(s.id)),
+    [signals, selectedSignalIds],
+  );
+
+  // Browse-all filtered list — every signal NOT already selected, with
+  // AI-suggested matches sorted to the top so they're the first thing
+  // the reviewer sees. The "AI suggested" pill + Why-line render
+  // inline on the row, so the user gets the AI hint without leaving
+  // this single list.
+  const browseFiltered = useMemo(() => {
+    const q = pickQuery.trim().toLowerCase();
+    const filtered = signals.filter(s => {
+      if (selectedSignalIds.has(s.id)) return false;
+      if (!q) return true;
+      return s.title.toLowerCase().includes(q) || (s.description ?? "").toLowerCase().includes(q);
+    });
+    // Sort: AI-suggested (highest score first) before plain rows.
+    filtered.sort((a, b) => {
+      const sa = aiSuggestionById.get(a.id)?.score ?? 0;
+      const sb = aiSuggestionById.get(b.id)?.score ?? 0;
+      return sb - sa;
+    });
+    return filtered.slice(0, 100);
+  }, [signals, selectedSignalIds, pickQuery, aiSuggestionById]);
 
   // Add ALL signals from a suggestion to the staging set. Optionally
   // also seeds the name/notes/reasons fields when they're empty so the
@@ -7150,11 +7471,11 @@ function NewGroupModal({
       <div
         data-keep-selection="new-group-modal"
         style={{
-          width: 720, maxWidth: "100%", maxHeight: "calc(100vh - 48px)",
+          width: 920, maxWidth: "100%", maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           background: "var(--bg)", border: "1px solid var(--border)",
           borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
-          padding: 20,
+          padding: "20px 22px",
           display: "flex", flexDirection: "column", gap: 14,
         }}
         onMouseDown={e => e.stopPropagation()}
@@ -7215,149 +7536,232 @@ function NewGroupModal({
             onBlur={e => (e.target.style.borderColor = "var(--border)")}
           />
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
-            Reasons <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>· optional</span>
-          </label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(Object.keys(SIGNAL_GROUP_REASON_LABEL) as SignalGroupReason[]).map(r => {
-              const active = reasons.includes(r);
-              return (
+        {/* Reasons — compact by default. Collapsed shows a small
+            "+ Add reasons" pill; expanded reveals the full chip grid.
+            Selected reasons stay visible inline either way so they
+            don't get lost behind the toggle. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          {reasons.length === 0 && !reasonsOpen ? (
+            <button
+              onClick={() => setReasonsOpen(true)}
+              type="button"
+              style={{
+                padding: "2px 10px", borderRadius: 100,
+                background: "transparent", border: "1px dashed var(--border-strong)",
+                color: "var(--text-tertiary)",
+                fontSize: 11, fontWeight: 500, cursor: "pointer",
+              }}
+            >
+              + Add reasons
+            </button>
+          ) : (
+            <>
+              <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Reasons:</span>
+              {reasons.map(r => (
                 <button
                   key={r}
                   onClick={() => toggleReason(r)}
                   type="button"
+                  title="Click to remove"
                   style={{
-                    padding: "3px 10px", borderRadius: 100,
-                    border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
-                    background: active ? "var(--accent-soft)" : "var(--bg)",
-                    color: active ? "var(--accent)" : "var(--text-secondary)",
+                    padding: "2px 10px", borderRadius: 100,
+                    border: "1px solid var(--accent)",
+                    background: "var(--accent-soft)",
+                    color: "var(--accent)",
                     fontSize: 11, fontWeight: 500, cursor: "pointer",
                   }}
                 >
                   {SIGNAL_GROUP_REASON_LABEL[r]}
                 </button>
-              );
-            })}
-          </div>
+              ))}
+              <button
+                onClick={() => setReasonsOpen(o => !o)}
+                type="button"
+                style={{
+                  padding: "2px 8px", borderRadius: 100,
+                  background: "transparent", border: "none",
+                  color: "var(--text-tertiary)",
+                  fontSize: 11, cursor: "pointer",
+                }}
+              >
+                {reasonsOpen ? "Hide options" : "+ Add"}
+              </button>
+              {reasonsOpen && (
+                <div style={{ display: "flex", flexBasis: "100%", flexWrap: "wrap", gap: 4 }}>
+                  {(Object.keys(SIGNAL_GROUP_REASON_LABEL) as SignalGroupReason[])
+                    .filter(r => !reasons.includes(r))
+                    .map(r => (
+                      <button
+                        key={r}
+                        onClick={() => toggleReason(r)}
+                        type="button"
+                        style={{
+                          padding: "2px 10px", borderRadius: 100,
+                          background: "var(--bg)", border: "1px solid var(--border)",
+                          color: "var(--text-secondary)",
+                          fontSize: 11, fontWeight: 500, cursor: "pointer",
+                        }}
+                      >
+                        + {SIGNAL_GROUP_REASON_LABEL[r]}
+                      </button>
+                    ))
+                  }
+                </div>
+              )}
+            </>
+          )}
         </div>
 
-        {/* ── Signals section with tabs ───────────────────────────── */}
+        {/* ── Signals section — stacked sub-sections: Selected,
+            AI suggestions for this group, AI group ideas, Browse all.
+            All visible simultaneously so manual + AI work side-by-side. */}
         <div style={{
-          marginTop: 4, padding: "10px 12px",
+          marginTop: 4, padding: "12px 14px",
           border: "1px solid var(--border)", borderRadius: "var(--radius)",
           background: "var(--bg-sunken)",
-          display: "flex", flexDirection: "column", gap: 10,
+          display: "flex", flexDirection: "column", gap: 14,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <label style={{ fontSize: 11, fontWeight: 500, color: "var(--text-secondary)" }}>
-              Signals
-            </label>
-            <span style={{ flex: 1 }} />
+          {/* Section A — Selected signals */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" }}>
+                Selected signals
+              </span>
+              {selectedSignalIds.size > 0 ? (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 600,
+                  color: "var(--accent)",
+                  background: "var(--accent-soft)",
+                  border: "1px solid var(--accent)",
+                  borderRadius: 100, padding: "1px 8px",
+                }}>
+                  {selectedSignalIds.size}
+                </span>
+              ) : (
+                <span style={{ fontSize: 10.5, color: "var(--text-tertiary)" }}>· none yet</span>
+              )}
+              <span style={{ flex: 1 }} />
+              <div style={{ display: "inline-flex", gap: 2, background: "var(--bg)", borderRadius: 100, padding: 2, border: "1px solid var(--border)" }}>
+                {(["comfortable", "grid", "compact"] as const).map(d => {
+                  const active = density === d;
+                  return (
+                    <button
+                      key={d}
+                      onClick={() => setDensity(d)}
+                      title={d === "comfortable" ? "Stacked cards" : d === "grid" ? "Grid — 2 per row" : "Compact list"}
+                      style={{
+                        padding: "3px 10px", borderRadius: 100, border: "none",
+                        background: active ? "var(--bg-sunken)" : "transparent",
+                        color: active ? "var(--text)" : "var(--text-secondary)",
+                        fontSize: 11, fontWeight: 500, cursor: "pointer",
+                      }}
+                    >
+                      {d === "comfortable" ? "Cards" : d === "grid" ? "Grid" : "Compact"}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {selectedSignalsList.length === 0 ? (
+              <div style={{
+                padding: "10px 12px", borderRadius: "var(--radius)",
+                border: "1px dashed var(--border)", background: "var(--bg)",
+                fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5,
+              }}>
+                No signals picked yet. Add some from the AI suggestions below, click <em>Use this</em> on a group idea, or open <em>Browse all signals</em> to search manually.
+              </div>
+            ) : (
+              <div style={{
+                maxHeight: 280, overflowY: "auto",
+                display: density === "grid" ? "grid" : "flex",
+                ...(density === "grid"
+                  ? { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", alignItems: "stretch" }
+                  : { flexDirection: "column" }),
+                gap: density === "compact" ? 3 : density === "grid" ? 8 : 6,
+                paddingRight: 4,
+              }}>
+                {selectedSignalsList.map(s => (
+                  <SuggestedSignalRow
+                    key={s.id}
+                    signal={s}
+                    density={density}
+                    selected
+                    signalGroups={signalGroups}
+                    attachments={signalAttachments}
+                    onRemove={() => removeSelectedSignal(s.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sections C + D — single segmented toggle. Browse all (with
+              AI suggestions woven in via row pills) OR ✦ Group ideas
+              (cluster cards). One mode at a time so the modal doesn't
+              get tall. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ display: "inline-flex", gap: 2, background: "var(--bg)", borderRadius: 100, padding: 2, border: "1px solid var(--border)" }}>
-              {(["pick", "ai"] as const).map(t => {
-                const active = tab === t;
+              {([
+                { key: "browse", label: "Browse all signals", count: browseFiltered.length },
+                { key: "ideas",  label: "✦ Group ideas",       count: suggestions.length },
+              ] as const).map(opt => {
+                const active = addSource === opt.key;
                 return (
                   <button
-                    key={t}
-                    onClick={() => setTab(t)}
+                    key={opt.key}
+                    onClick={() => setAddSource(opt.key)}
                     style={{
-                      padding: "3px 10px", borderRadius: 100, border: "none",
+                      padding: "3px 12px", borderRadius: 100, border: "none",
                       background: active ? "var(--bg-sunken)" : "transparent",
                       color: active ? "var(--text)" : "var(--text-secondary)",
                       fontSize: 11, fontWeight: 500, cursor: "pointer",
                     }}
                   >
-                    {t === "pick" ? "Pick signals" : "✦ AI suggestions"}
+                    {opt.label}
+                    <span style={{ color: active ? "var(--text-tertiary)" : "var(--text-tertiary)", marginLeft: 4 }}>
+                      · {opt.count}
+                    </span>
                   </button>
                 );
               })}
             </div>
+            {addSource === "browse" && perSignalSuggestions.length > 0 && (
+              <span style={{
+                fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                color: "#7e22ce",
+                background: "rgba(168,85,247,0.10)",
+                border: "1px solid rgba(168,85,247,0.40)",
+                borderRadius: 100, padding: "1px 8px",
+              }}>
+                ✦ {perSignalSuggestions.length} AI suggested in list
+              </span>
+            )}
           </div>
 
-          {tab === "pick" ? (
-            <>
-              <input
-                value={pickQuery}
-                onChange={e => setPickQuery(e.target.value)}
-                placeholder="Search signals by title or description…"
-                style={{
-                  padding: "6px 10px",
-                  border: "1px solid var(--border)", borderRadius: "var(--radius)",
-                  background: "var(--bg)", color: "var(--text)",
-                  fontSize: 12, outline: "none",
-                }}
-                onFocus={e => (e.target.style.borderColor = "var(--accent)")}
-                onBlur={e => (e.target.style.borderColor = "var(--border)")}
-              />
-              <div style={{
-                maxHeight: 280, overflowY: "auto",
-                display: "flex", flexDirection: "column", gap: 4,
-                paddingRight: 2,
-              }}>
-                {filteredSignals.length === 0 ? (
-                  <div style={{ padding: 12, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center" }}>
-                    No signals match. Try a shorter query.
-                  </div>
-                ) : (
-                  filteredSignals.map(s => {
-                    const isSelected = selectedSignalIds.has(s.id);
-                    return (
-                      <label
-                        key={s.id}
-                        style={{
-                          display: "flex", alignItems: "flex-start", gap: 8,
-                          padding: "6px 8px",
-                          border: isSelected ? "1px solid var(--accent)" : "1px solid var(--border)",
-                          borderRadius: "var(--radius)",
-                          background: isSelected ? "var(--accent-soft)" : "var(--bg)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSignal(s.id)}
-                          style={{ marginTop: 2 }}
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{
-                            fontSize: 12, fontWeight: 500, color: "var(--text)",
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          }}>
-                            {s.title}
-                          </div>
-                          <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 1 }}>
-                            <span className="mono" style={{ fontSize: 10, color: "var(--text-tertiary)" }}>{s.id}</span>
-                            <span style={{ fontSize: 10, color: "var(--text-tertiary)", textTransform: "capitalize" }}>· {s.source}</span>
-                            <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>· {s.status}</span>
-                          </div>
-                        </div>
-                      </label>
-                    );
-                  })
-                )}
-              </div>
-            </>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <p style={{ margin: 0, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                Possible clusters detected from <strong style={{ color: "var(--text)" }}>{ungroupedSignals.length}</strong> ungrouped signals. Click a suggestion to expand its signal list, then add the ones you want — or use <em>Add all</em>.
-              </p>
+          {/* Fixed-height wrapper so switching toggles doesn't resize
+              the modal. Both branches have their own internal scroll
+              capped near this number, so the visual frame stays put. */}
+          <div style={{ minHeight: 500, display: "flex", flexDirection: "column" }}>
+          {addSource === "ideas" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {suggestions.length === 0 ? (
                 <div style={{
-                  padding: "16px 14px", textAlign: "center",
-                  fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.55,
-                  border: "1px dashed var(--border)", borderRadius: "var(--radius)",
-                  background: "var(--bg)",
+                  padding: "10px 12px", borderRadius: "var(--radius)",
+                  border: "1px dashed var(--border)", background: "var(--bg)",
+                  fontSize: 11.5, color: "var(--text-tertiary)", lineHeight: 1.5,
                 }}>
-                  No obvious clusters found. Switch to <strong style={{ color: "var(--text-secondary)" }}>Pick signals</strong> to choose manually.
+                  No obvious clusters in the ungrouped signal pool right now.
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto", paddingRight: 4 }}>
                   {suggestions.map(sg => {
                     const expanded = expandedSuggestionId === sg.id;
                     const allIn = sg.signalIds.every(id => selectedSignalIds.has(id));
+                    const confPalette = sg.confidence === "high"
+                      ? { bg: "rgba(34,197,94,0.10)", fg: "#15803d", bd: "rgba(34,197,94,0.40)" }
+                      : sg.confidence === "medium"
+                        ? { bg: "rgba(59,130,246,0.10)", fg: "#1d4ed8", bd: "rgba(59,130,246,0.35)" }
+                        : { bg: "var(--bg-sunken)", fg: "var(--text-secondary)", bd: "var(--border)" };
                     return (
                       <div
                         key={sg.id}
@@ -7367,36 +7771,48 @@ function NewGroupModal({
                           overflow: "hidden",
                         }}
                       >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px" }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px" }}>
                           <button
                             onClick={() => setExpandedSuggestionId(expanded ? null : sg.id)}
                             style={{
                               flex: 1, minWidth: 0, textAlign: "left",
                               background: "transparent", border: "none", padding: 0,
                               cursor: "pointer",
-                              display: "flex", alignItems: "center", gap: 6,
+                              display: "flex", alignItems: "flex-start", gap: 8,
                             }}
                             title={expanded ? "Hide signals" : "Show the signals in this suggestion"}
                           >
-                            {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                            <span style={{ marginTop: 3 }}>
+                              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            </span>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>
-                                {sg.name}
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                                  {sg.name}
+                                </span>
+                                <span style={{
+                                  fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, textTransform: "uppercase",
+                                  color: confPalette.fg, background: confPalette.bg,
+                                  border: `1px solid ${confPalette.bd}`,
+                                  borderRadius: 100, padding: "1px 7px",
+                                }}>
+                                  {sg.confidence} confidence
+                                </span>
+                                <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                                  · {sg.signalIds.length} signal{sg.signalIds.length === 1 ? "" : "s"}
+                                </span>
                               </div>
-                              <div style={{ fontSize: 11, color: "var(--text-tertiary)", lineHeight: 1.4 }}>
-                                {sg.notes}
+                              <div style={{ marginTop: 2, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                                <em style={{ color: "var(--text-tertiary)" }}>Why:</em> {sg.why}
                               </div>
                             </div>
                           </button>
-                          <span style={{ fontSize: 10.5, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
-                            {sg.signalIds.length} signal{sg.signalIds.length === 1 ? "" : "s"}
-                          </span>
                           <button
                             onClick={() => applySuggestion(sg)}
                             disabled={allIn}
-                            title={allIn ? "All these signals are already selected" : "Add all signals from this suggestion (also seeds empty name/context fields)"}
+                            title={allIn ? "All these signals are already selected" : "Add every signal in this suggestion. If the group fields above are still empty, the suggestion seeds them as a starting point."}
                             style={{
-                              padding: "2px 10px", borderRadius: 100,
+                              padding: "4px 12px", borderRadius: 100,
                               background: allIn ? "var(--bg-sunken)" : "var(--accent)",
                               color: allIn ? "var(--text-tertiary)" : "white",
                               border: "none", fontSize: 11, fontWeight: 600,
@@ -7409,39 +7825,28 @@ function NewGroupModal({
                         {expanded && (
                           <div style={{
                             borderTop: "1px solid var(--border)",
-                            padding: "6px 10px",
-                            display: "flex", flexDirection: "column", gap: 3,
+                            padding: "8px 10px",
+                            display: "flex", flexDirection: "column", gap: 4,
                             background: "var(--bg-sunken)",
+                            // Tight inner scroll so the expanded cluster
+                            // doesn't push other cluster headers off
+                            // the outer scroll container — the other
+                            // groups stay visible just below.
+                            maxHeight: 220, overflowY: "auto",
                           }}>
                             {sg.signalIds.map(id => {
                               const sig = signals.find(x => x.id === id);
                               if (!sig) return null;
-                              const isSelected = selectedSignalIds.has(id);
                               return (
-                                <label
+                                <ModalSignalRow
                                   key={id}
-                                  style={{
-                                    display: "flex", alignItems: "center", gap: 8,
-                                    padding: "4px 6px",
-                                    borderRadius: "var(--radius-sm)",
-                                    background: isSelected ? "var(--accent-soft)" : "transparent",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => toggleSignal(id)}
-                                  />
-                                  <span style={{
-                                    flex: 1, minWidth: 0,
-                                    fontSize: 12, color: "var(--text)",
-                                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  }}>
-                                    {sig.title}
-                                  </span>
-                                  <span className="mono" style={{ fontSize: 10, color: "var(--text-tertiary)" }}>{sig.id}</span>
-                                </label>
+                                  signal={sig}
+                                  density={density === "grid" ? "comfortable" : density}
+                                  isSelected={selectedSignalIds.has(id)}
+                                  onToggle={() => toggleSignal(id)}
+                                  signalGroups={signalGroups}
+                                  attachments={signalAttachments}
+                                />
                               );
                             })}
                           </div>
@@ -7452,7 +7857,56 @@ function NewGroupModal({
                 </div>
               )}
             </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <input
+                  value={pickQuery}
+                  onChange={e => setPickQuery(e.target.value)}
+                  placeholder="Search signals by title or description…"
+                  style={{
+                    padding: "6px 10px",
+                    border: "1px solid var(--border)", borderRadius: "var(--radius)",
+                    background: "var(--bg)", color: "var(--text)",
+                    fontSize: 12, outline: "none",
+                  }}
+                  onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                  onBlur={e => (e.target.style.borderColor = "var(--border)")}
+                />
+                <div style={{
+                  maxHeight: 460, overflowY: "auto",
+                  display: density === "grid" ? "grid" : "flex",
+                  ...(density === "grid"
+                    ? { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", alignItems: "stretch" }
+                    : { flexDirection: "column" }),
+                  gap: density === "compact" ? 3 : density === "grid" ? 8 : 6,
+                  paddingRight: 4,
+                }}>
+                  {browseFiltered.length === 0 ? (
+                    <div style={{ padding: 12, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", gridColumn: "1 / -1" }}>
+                      {pickQuery ? "No signals match. Try a shorter query." : "Every signal is already selected."}
+                    </div>
+                  ) : (
+                    browseFiltered.map(s => {
+                      const ai = aiSuggestionById.get(s.id);
+                      return (
+                        <ModalSignalRow
+                          key={s.id}
+                          signal={s}
+                          density={density}
+                          isSelected={false}
+                          onToggle={() => addSuggestedSignal(s.id)}
+                          signalGroups={signalGroups}
+                          attachments={signalAttachments}
+                          aiSuggested={!!ai}
+                          aiWhy={ai?.why}
+                        />
+                      );
+                    })
+                  )}
+                </div>
+            </div>
           )}
+          </div>
         </div>
 
         {/* ── Footer: running total + actions ──────────────────────── */}
@@ -7462,8 +7916,8 @@ function NewGroupModal({
         }}>
           <span style={{ fontSize: 12, color: selectedSignalIds.size === 0 ? "var(--text-tertiary)" : "var(--text-secondary)" }}>
             {selectedSignalIds.size === 0
-              ? "No signals selected — group will start empty (you can add some later)."
-              : `${selectedSignalIds.size} signal${selectedSignalIds.size === 1 ? "" : "s"} selected`}
+              ? "No signals selected — you can add some later in the workspace."
+              : `${selectedSignalIds.size} signal${selectedSignalIds.size === 1 ? "" : "s"} will be added to the new group`}
           </span>
           <span style={{ flex: 1 }} />
           <button
@@ -7488,12 +7942,389 @@ function NewGroupModal({
               cursor: canConfirm ? "pointer" : "default",
             }}
           >
-            Create group
+            {selectedSignalIds.size === 0
+              ? "Create empty group — add signals later"
+              : `Create group · ${selectedSignalIds.size} signal${selectedSignalIds.size === 1 ? "" : "s"}`}
           </button>
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+// ── ModalSignalRow ─────────────────────────────────────────────────────
+// Rich selectable row used by the New group modal. Shows enough context
+// for the reviewer to actually decide whether this signal belongs in
+// the group: title, description excerpt, reporter, status, priority,
+// source, attachment count, and how many other groups it sits in.
+// Two densities — comfortable (default, card-like) and compact
+// (one-liner) — driven by the toolbar toggle.
+function ModalSignalRow({
+  signal, density, isSelected, onToggle, signalGroups, attachments,
+  aiSuggested, aiWhy,
+}: {
+  signal: Signal;
+  density: "comfortable" | "compact" | "grid";
+  isSelected: boolean;
+  onToggle: () => void;
+  signalGroups: import("@/lib/data").SignalGroup[];
+  attachments: import("@/lib/data").SignalAttachment[];
+  // When set, the row gets a purple "AI SUGGESTED" pill + Why line so
+  // AI-scored matches read distinctly inside the regular Browse list.
+  aiSuggested?: boolean;
+  aiWhy?: string;
+}) {
+  const reporter = userByIdSafe(signal.author);
+  const ownAttachments = attachments.filter(a => a.signalId === signal.id).length;
+  const attachmentCount = (signal.screenshots ?? 0) + ownAttachments;
+  const membershipCount = signalGroups.filter(g => g.signalIds.includes(signal.id)).length;
+  const pp = _PRIORITY_PALETTE[signal.priority];
+  const ageLabel = relTime(signal.createdAt);
+
+  if (density === "compact") {
+    return (
+      <label
+        style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "4px 8px",
+          border: isSelected ? "1px solid var(--accent)" : "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          background: isSelected ? "var(--accent-soft)" : "var(--bg)",
+          cursor: "pointer",
+        }}
+      >
+        <input type="checkbox" checked={isSelected} onChange={onToggle} />
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.2,
+          color: pp.fg, background: pp.bg, border: `1px solid ${pp.bd}`,
+          borderRadius: 100, padding: "0 6px",
+          textTransform: "uppercase",
+        }}>{signal.priority}</span>
+        <span style={{
+          flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{signal.title}</span>
+        {aiSuggested && (
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+            color: "#7e22ce",
+            background: "rgba(168,85,247,0.12)",
+            border: "1px solid rgba(168,85,247,0.40)",
+            borderRadius: 100, padding: "0 6px",
+            whiteSpace: "nowrap",
+          }} title={aiWhy}>
+            ✦ AI
+          </span>
+        )}
+        {reporter && (
+          <span style={{ fontSize: 10.5, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+            {reporter}
+          </span>
+        )}
+        <span style={{
+          fontSize: 10, fontWeight: 600, textTransform: "capitalize",
+          color: "var(--text-tertiary)",
+          background: "var(--bg-sunken)", border: "1px solid var(--border)",
+          borderRadius: 100, padding: "0 7px",
+        }}>{signal.status}</span>
+      </label>
+    );
+  }
+
+  return (
+    <label
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 10,
+        padding: "8px 10px",
+        border: isSelected ? "1px solid var(--accent)" : "1px solid var(--border)",
+        borderRadius: "var(--radius)",
+        background: isSelected ? "var(--accent-soft)" : "var(--bg)",
+        cursor: "pointer",
+      }}
+    >
+      <input type="checkbox" checked={isSelected} onChange={onToggle} style={{ marginTop: 3 }} />
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        {/* Title row + status pills */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{
+            fontSize: 13, fontWeight: 600, color: "var(--text)",
+            overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {signal.title}
+          </span>
+          {aiSuggested && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+              color: "#7e22ce",
+              background: "rgba(168,85,247,0.12)",
+              border: "1px solid rgba(168,85,247,0.40)",
+              borderRadius: 100, padding: "1px 7px",
+              whiteSpace: "nowrap",
+            }}>
+              ✦ AI SUGGESTED
+            </span>
+          )}
+          <span style={{
+            fontSize: 9.5, fontWeight: 700, letterSpacing: 0.2,
+            color: pp.fg, background: pp.bg, border: `1px solid ${pp.bd}`,
+            borderRadius: 100, padding: "0 7px",
+            textTransform: "uppercase",
+          }}>{signal.priority}</span>
+          <span style={{
+            fontSize: 10, fontWeight: 600, textTransform: "capitalize",
+            color: "var(--text-tertiary)",
+            background: "var(--bg-sunken)", border: "1px solid var(--border)",
+            borderRadius: 100, padding: "0 7px",
+          }}>{signal.status}</span>
+        </div>
+        {/* AI Why-line — only when this row is an AI suggestion */}
+        {aiSuggested && aiWhy && (
+          <div style={{ fontSize: 11, color: "#7e22ce", lineHeight: 1.45 }}>
+            <em style={{ color: "var(--text-tertiary)" }}>Why:</em> {aiWhy}
+          </div>
+        )}
+        {/* Description excerpt — 2-line clamp */}
+        {signal.description && (
+          <div style={{
+            fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5,
+            display: "-webkit-box",
+            WebkitLineClamp: 2 as unknown as number,
+            WebkitBoxOrient: "vertical" as const,
+            overflow: "hidden",
+          }}>
+            {signal.description}
+          </div>
+        )}
+        {/* Metadata row */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 10.5, color: "var(--text-tertiary)" }}>
+          {reporter && <span><strong style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{reporter}</strong></span>}
+          {reporter && <span>·</span>}
+          <span style={{ textTransform: "capitalize" }}>{signal.source}</span>
+          <span>·</span>
+          <span>{ageLabel}</span>
+          {attachmentCount > 0 && (
+            <>
+              <span>·</span>
+              <span>📎 {attachmentCount}</span>
+            </>
+          )}
+          {membershipCount > 0 && (
+            <>
+              <span>·</span>
+              <span style={{ color: "var(--text-secondary)" }}>
+                in {membershipCount} other group{membershipCount === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
+          <span style={{ flex: 1 }} />
+          <span className="mono" style={{ fontSize: 10 }}>{signal.id}</span>
+        </div>
+      </div>
+    </label>
+  );
+}
+
+// ── SuggestedSignalRow ─────────────────────────────────────────────────
+// Variant of ModalSignalRow used inside the New group modal for two
+// related states:
+//   • selected — the signal is in the staging set; show a Remove ×
+//   • suggested — AI proposed it; show a "Why" line + Add + Dismiss
+// Rich card body (title / description / reporter / status / priority /
+// source / attachments / multi-group count) is unchanged across both.
+function SuggestedSignalRow({
+  signal, density, selected, why, signalGroups, attachments,
+  onAdd, onDismiss, onRemove,
+}: {
+  signal: Signal;
+  density: "comfortable" | "compact" | "grid";
+  // Either selected=true (staged) OR selected omitted + onAdd/onDismiss provided (suggestion).
+  selected?: boolean;
+  why?: string;
+  signalGroups: import("@/lib/data").SignalGroup[];
+  attachments: import("@/lib/data").SignalAttachment[];
+  onAdd?: () => void;
+  onDismiss?: () => void;
+  onRemove?: () => void;
+}) {
+  const reporter = userByIdSafe(signal.author);
+  const ownAttachments = attachments.filter(a => a.signalId === signal.id).length;
+  const attachmentCount = (signal.screenshots ?? 0) + ownAttachments;
+  const membershipCount = signalGroups.filter(g => g.signalIds.includes(signal.id)).length;
+  const pp = _PRIORITY_PALETTE[signal.priority];
+  const ageLabel = relTime(signal.createdAt);
+  const isSuggestion = !selected && (onAdd || onDismiss);
+
+  // Compact density — single-line variant for dense scanning.
+  if (density === "compact") {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "4px 8px",
+        border: selected ? "1px solid var(--accent)" : isSuggestion ? "1px dashed rgba(168,85,247,0.45)" : "1px solid var(--border)",
+        borderRadius: "var(--radius)",
+        background: selected ? "var(--accent-soft)" : isSuggestion ? "rgba(168,85,247,0.04)" : "var(--bg)",
+      }}>
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.2,
+          color: pp.fg, background: pp.bg, border: `1px solid ${pp.bd}`,
+          borderRadius: 100, padding: "0 6px", textTransform: "uppercase",
+        }}>{signal.priority}</span>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {signal.title}
+        </span>
+        {reporter && <span style={{ fontSize: 10.5, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>{reporter}</span>}
+        <span style={{
+          fontSize: 10, fontWeight: 600, textTransform: "capitalize",
+          color: "var(--text-tertiary)", background: "var(--bg-sunken)",
+          border: "1px solid var(--border)", borderRadius: 100, padding: "0 7px",
+        }}>{signal.status}</span>
+        {selected && onRemove && (
+          <button onClick={onRemove} aria-label="Remove" title="Remove from selection"
+            style={{ padding: 3, background: "transparent", border: "none", cursor: "pointer", color: "var(--text-tertiary)" }}>
+            <X size={10} />
+          </button>
+        )}
+        {isSuggestion && (
+          <>
+            <button onClick={onDismiss}
+              style={{ padding: "2px 9px", borderRadius: 100, background: "transparent", border: "1px solid var(--border)", color: "var(--text-tertiary)", fontSize: 10.5, fontWeight: 500, cursor: "pointer" }}>
+              Dismiss
+            </button>
+            <button onClick={onAdd}
+              style={{ padding: "2px 9px", borderRadius: 100, background: "var(--accent)", color: "white", border: "none", fontSize: 10.5, fontWeight: 600, cursor: "pointer" }}>
+              Add
+            </button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Comfortable / Grid — full card.
+  return (
+    <div style={{
+      display: "flex", alignItems: "flex-start", gap: 10,
+      padding: "8px 10px",
+      border: selected ? "1px solid var(--accent)" : isSuggestion ? "1px dashed rgba(168,85,247,0.45)" : "1px solid var(--border)",
+      borderRadius: "var(--radius)",
+      background: selected ? "var(--accent-soft)" : isSuggestion ? "rgba(168,85,247,0.04)" : "var(--bg)",
+    }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        {/* Title row + status pills */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+            {signal.title}
+          </span>
+          <span style={{
+            fontSize: 9.5, fontWeight: 700, letterSpacing: 0.2,
+            color: pp.fg, background: pp.bg, border: `1px solid ${pp.bd}`,
+            borderRadius: 100, padding: "0 7px", textTransform: "uppercase",
+          }}>{signal.priority}</span>
+          <span style={{
+            fontSize: 10, fontWeight: 600, textTransform: "capitalize",
+            color: "var(--text-tertiary)", background: "var(--bg-sunken)",
+            border: "1px solid var(--border)", borderRadius: 100, padding: "0 7px",
+          }}>{signal.status}</span>
+          {isSuggestion && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+              color: "#7e22ce",
+              background: "rgba(168,85,247,0.12)",
+              border: "1px solid rgba(168,85,247,0.40)",
+              borderRadius: 100, padding: "0 6px",
+            }}>
+              AI SUGGESTED
+            </span>
+          )}
+        </div>
+        {/* Description excerpt */}
+        {signal.description && (
+          <div style={{
+            fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.5,
+            display: "-webkit-box",
+            WebkitLineClamp: 2 as unknown as number,
+            WebkitBoxOrient: "vertical" as const,
+            overflow: "hidden",
+          }}>
+            {signal.description}
+          </div>
+        )}
+        {/* Why-it-fits line — only on suggestions */}
+        {isSuggestion && why && (
+          <div style={{ fontSize: 11, color: "#7e22ce", lineHeight: 1.45 }}>
+            <em style={{ color: "var(--text-tertiary)" }}>Why:</em> {why}
+          </div>
+        )}
+        {/* Metadata row */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 10.5, color: "var(--text-tertiary)" }}>
+          {reporter && <span><strong style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{reporter}</strong></span>}
+          {reporter && <span>·</span>}
+          <span style={{ textTransform: "capitalize" }}>{signal.source}</span>
+          <span>·</span>
+          <span>{ageLabel}</span>
+          {attachmentCount > 0 && (
+            <>
+              <span>·</span>
+              <span>📎 {attachmentCount}</span>
+            </>
+          )}
+          {membershipCount > 0 && (
+            <>
+              <span>·</span>
+              <span style={{ color: "var(--text-secondary)" }}>
+                in {membershipCount} group{membershipCount === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
+          <span style={{ flex: 1 }} />
+          <span className="mono" style={{ fontSize: 10 }}>{signal.id}</span>
+        </div>
+      </div>
+      {/* Right-side action stack — depends on mode */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
+        {selected && onRemove && (
+          <button
+            onClick={onRemove}
+            aria-label="Remove from selection"
+            title="Remove from selection"
+            style={{
+              padding: "3px 10px", borderRadius: 100,
+              background: "transparent", border: "1px solid var(--border)",
+              color: "var(--text-tertiary)", fontSize: 10.5, fontWeight: 500, cursor: "pointer",
+            }}
+          >
+            Remove
+          </button>
+        )}
+        {isSuggestion && (
+          <>
+            <button
+              onClick={onAdd}
+              title="Add this signal to the new group"
+              style={{
+                padding: "3px 12px", borderRadius: 100,
+                background: "var(--accent)", color: "white",
+                border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              Add
+            </button>
+            <button
+              onClick={onDismiss}
+              title="Hide this suggestion for this session"
+              style={{
+                padding: "3px 12px", borderRadius: 100,
+                background: "transparent", border: "1px solid var(--border)",
+                color: "var(--text-tertiary)", fontSize: 11, fontWeight: 500, cursor: "pointer",
+              }}
+            >
+              Dismiss
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -7759,6 +8590,187 @@ function SuggestSignalsModal({
             }}
           >
             Done
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ── AddSignalsModal ────────────────────────────────────────────────────
+// Browse + pick any signals NOT already in this group, then add them
+// in one action. Companion to SuggestSignalsModal (✦ AI), used when
+// the user wants to add signals manually — including the case where
+// the group was created empty and the user wants to populate it
+// afterwards.
+function AddSignalsModal({
+  group, onClose, onAdd,
+}: {
+  group: SignalGroup;
+  onClose: () => void;
+  onAdd: (ids: string[]) => void;
+}) {
+  const { signals, signalGroups, signalAttachments } = useStore();
+  const [query, setQuery] = useState("");
+  const [density, setDensity] = useState<"comfortable" | "compact" | "grid">("comfortable");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const toggle = (id: string) => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+
+  const inGroup = useMemo(() => new Set(group.signalIds), [group.signalIds]);
+  const candidates = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return signals.filter(s => {
+      if (inGroup.has(s.id)) return false;
+      if (!q) return true;
+      return s.title.toLowerCase().includes(q) || (s.description ?? "").toLowerCase().includes(q);
+    }).slice(0, 200);
+  }, [signals, inGroup, query]);
+
+  return createPortal(
+    <div
+      data-keep-selection="add-signals-modal"
+      role="dialog"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(15,23,42,0.45)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div
+        data-keep-selection="add-signals-modal"
+        style={{
+          width: 920, maxWidth: "100%", maxHeight: "calc(100vh - 48px)",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-lg)",
+          padding: "20px 22px",
+          display: "flex", flexDirection: "column", gap: 12,
+        }}
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "var(--text)", flex: 1 }}>
+            Add signals to &ldquo;{group.name}&rdquo;
+          </h2>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              padding: 4, background: "transparent", border: "none", cursor: "pointer",
+              color: "var(--text-tertiary)", borderRadius: "var(--radius-sm)",
+            }}
+          >
+            <X size={12} />
+          </button>
+        </div>
+        <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+          Browse every signal that isn't already in this group. Tick the ones you want, then add them all at once. Adding doesn't change the signal record — it just attaches it to the group.
+        </p>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            autoFocus
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search by title or description…"
+            style={{
+              flex: 1,
+              padding: "6px 10px",
+              border: "1px solid var(--border)", borderRadius: "var(--radius)",
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: 12, outline: "none",
+            }}
+            onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+            onBlur={e => (e.target.style.borderColor = "var(--border)")}
+          />
+          <div style={{ display: "inline-flex", gap: 2, background: "var(--bg-sunken)", borderRadius: 100, padding: 2, border: "1px solid var(--border)" }}>
+            {(["comfortable", "grid", "compact"] as const).map(d => {
+              const active = density === d;
+              return (
+                <button
+                  key={d}
+                  onClick={() => setDensity(d)}
+                  title={d === "comfortable" ? "Stacked cards" : d === "grid" ? "Grid — 2 per row" : "Compact list"}
+                  style={{
+                    padding: "3px 10px", borderRadius: 100, border: "none",
+                    background: active ? "var(--bg)" : "transparent",
+                    color: active ? "var(--text)" : "var(--text-secondary)",
+                    fontSize: 11, fontWeight: 500, cursor: "pointer",
+                  }}
+                >
+                  {d === "comfortable" ? "Cards" : d === "grid" ? "Grid" : "Compact"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{
+          flex: 1, minHeight: 0,
+          maxHeight: 460, overflowY: "auto",
+          display: density === "grid" ? "grid" : "flex",
+          ...(density === "grid"
+            ? { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", alignItems: "stretch" }
+            : { flexDirection: "column" }),
+          gap: density === "compact" ? 3 : density === "grid" ? 8 : 6,
+          paddingRight: 4,
+        }}>
+          {candidates.length === 0 ? (
+            <div style={{ padding: 20, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", gridColumn: "1 / -1" }}>
+              {query ? "No signals match. Try a shorter query." : "Every signal is already in this group."}
+            </div>
+          ) : (
+            candidates.map(s => (
+              <ModalSignalRow
+                key={s.id}
+                signal={s}
+                density={density}
+                isSelected={picked.has(s.id)}
+                onToggle={() => toggle(s.id)}
+                signalGroups={signalGroups}
+                attachments={signalAttachments}
+              />
+            ))
+          )}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 12, color: picked.size === 0 ? "var(--text-tertiary)" : "var(--text-secondary)" }}>
+            {picked.size === 0
+              ? "Nothing picked yet."
+              : `${picked.size} signal${picked.size === 1 ? "" : "s"} will be added`}
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={onClose}
+            style={{
+              padding: "6px 14px", borderRadius: "var(--radius)",
+              background: "transparent", border: "1px solid var(--border)",
+              color: "var(--text-secondary)", fontSize: "var(--fs-body)", fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onAdd(Array.from(picked))}
+            disabled={picked.size === 0}
+            style={{
+              padding: "6px 14px", borderRadius: "var(--radius)",
+              background: picked.size > 0 ? "var(--accent)" : "var(--bg-sunken)",
+              color: picked.size > 0 ? "white" : "var(--text-tertiary)",
+              border: "none", fontSize: "var(--fs-body)", fontWeight: 600,
+              cursor: picked.size > 0 ? "pointer" : "default",
+            }}
+          >
+            {picked.size === 0 ? "Add to group" : `Add ${picked.size} to group`}
           </button>
         </div>
       </div>

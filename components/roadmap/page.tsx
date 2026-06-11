@@ -4335,11 +4335,19 @@ function ReleasesView() {
               horizontally when the milestones outgrow the page width.
               Selected card gets an accent border + bg. The last card is
               a dashed "+ New milestone" affordance so the user never
-              loses the create entry-point. */}
+              loses the create entry-point.
+
+              Sticky to the top of the scroll container so the list
+              stays in view while the user reads the detail card below.
+              Without this, scrolling through Product Scope hides the
+              other milestones from sight. */}
           <div style={{
             display: "flex", gap: 12, alignItems: "stretch",
             overflowX: "auto", overflowY: "hidden",
-            padding: "4px 4px 12px",
+            padding: "8px 4px 12px",
+            position: "sticky", top: 0, zIndex: 5,
+            background: "var(--bg-sunken)",
+            borderBottom: "1px solid var(--border)",
             // Tiny scrollbar styling via WebKit; native fallback elsewhere.
             scrollbarWidth: "thin" as const,
           }}>
@@ -4642,11 +4650,11 @@ function ReleaseCard({
     setMilestoneObjectPriority, setMilestoneObjectNote,
     setRoadmapFocus,
   } = useStore();
-  // Review = compact, content-first read of the milestone. Default —
-  // matches the same pattern used on Weekly Goal cards (less busy by
-  // default; click Configure to edit). Per-card state, so each
-  // milestone can be in its own mode independent of the others.
-  const [rawMode, setMode] = useState<"review" | "configure">("review");
+  // Milestones used to have a Review/Configure toggle; that was
+  // removed because the configure body is what users actually want by
+  // default (matching Product View). The mode constant stays as a
+  // local so the read-only snapshot path below can still force
+  // `"review"` on older versions, but there's no toggle UI anymore.
   // Family members for the version dropdown — all releases sharing this
   // milestone's versionFamilyId, sorted by createdAt so older versions
   // sit at the top. Includes this release itself.
@@ -4665,7 +4673,12 @@ function ReleaseCard({
   // shouldn't be edited directly (the spec calls this out explicitly).
   // If the user wants to evolve an old version, they clone it into a
   // new version via the "Create new version from this" affordance.
-  const mode = isLatestInFamily ? rawMode : "review";
+  // Every version (current or snapshot) now renders the full body —
+  // the user wants to see v1's actual scope/intents/history, not a
+  // compact summary. Read-only is enforced inline on the editable
+  // fields (title / dates / description / delete) + the snapshot
+  // banner above tells the user the version is historical.
+  const mode: "configure" = "configure";
   const themeIdsForRelease = themes
     .filter(t => t.linkedReleaseIds.includes(release.id))
     .map(t => t.id);
@@ -5090,21 +5103,6 @@ function ReleaseCard({
               {dateLabel ?? (isLatestInFamily ? "Set target date or range" : "No date")}
             </button>
           )}
-          {isLatestInFamily && (
-            <button
-              onClick={() => setMode(m => m === "review" ? "configure" : "review")}
-              title={mode === "review" ? "Switch to Configure to edit scope, MoSCoW, dates, and linking" : "Switch back to the compact Review view"}
-              style={{
-                padding: "3px 10px", borderRadius: 100,
-                border: mode === "configure" ? "1px solid var(--accent)" : "1px solid var(--border)",
-                background: mode === "configure" ? "var(--accent-soft)" : "var(--bg)",
-                color: mode === "configure" ? "var(--accent)" : "var(--text-secondary)",
-                fontSize: 11, fontWeight: 500, cursor: "pointer",
-              }}
-            >
-              {mode === "review" ? "Configure" : "Done"}
-            </button>
-          )}
           <button
             onClick={() => { if (window.confirm(`Delete milestone "${release.title}"? Linked objects stay where they are.`)) deleteRelease(release.id); }}
             aria-label="Delete milestone"
@@ -5189,27 +5187,10 @@ function ReleaseCard({
         </div>
       </div>
 
-      {/* ── Review mode body ── content-first compact summary. Used by
-          default; clicking Configure flips into the editor body
-          rendered below. Reads name → date → description (already
-          above) then: scope summary, MoSCoW summary bar, top scope
-          items, related weekly goals. */}
-      {mode === "review" && (
-        <MilestoneReviewSummary
-          release={release}
-          productLinks={productLinks}
-          byPriority={byPriority}
-          linkedGoals={linkedGoals}
-          onOpenConfigure={() => setMode("configure")}
-          onOpenGoal={(id) => setRoadmapFocus({ tab: "weekly", goalId: id })}
-        />
-      )}
-
       {/* 2-column body — MoSCoW scope (main) on the left, side panel
-          (related goals + search hints) on the right. Collapses to a
-          single column under ~860px so it still reads on narrower
-          windows. Only rendered in Configure mode. */}
-      {mode === "configure" && (
+          (related goals + search hints) on the right. Always rendered
+          so historical snapshots show the same structure as the
+          current version. */}
       <div style={{
         display: "flex", gap: 16, alignItems: "flex-start",
         flexWrap: "wrap",
@@ -5347,14 +5328,12 @@ function ReleaseCard({
           </div>
         </aside>
       </div>
-      )}
 
       {/* Change history — audit log of every recorded mutation on this
-          version. Only visible in Configure mode (Review keeps things
-          calm). Most-recent entries first; the very first row of every
+          version. Most-recent first; the very first row of every
           milestone is the "Created milestone" entry, so the log is
           never empty. */}
-      {mode === "configure" && release.auditLog.length > 0 && (
+      {release.auditLog.length > 0 && (
         <MilestoneAuditLog log={release.auditLog} versionLabel={release.versionLabel} />
       )}
 
