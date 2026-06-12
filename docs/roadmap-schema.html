@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal — Roadmap Data Model</title>
+<style>
+  :root {
+    --ink: #1c1c1e; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #4f46e5; --soft: #eef2ff; --bg: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 "Inter Tight", -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); margin: 0 0 40px; font-size: 15px; }
+  h2 {
+    font-size: 20px; margin: 56px 0 8px; letter-spacing: -0.01em;
+    padding-top: 24px; border-top: 1px solid var(--line);
+  }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  p.lead { color: #374151; max-width: 70ch; }
+  .diagram {
+    background: #fafafa; border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; margin: 20px 0; overflow-x: auto;
+    position: relative; cursor: zoom-in;
+  }
+  .diagram .mermaid { display: flex; justify-content: center; }
+  .diagram .hint {
+    position: absolute; top: 10px; right: 12px; font-size: 11.5px;
+    color: var(--muted); background: #fff; border: 1px solid var(--line);
+    border-radius: 100px; padding: 2px 10px; pointer-events: none;
+  }
+  /* ── full-screen zoomable lightbox ── */
+  #lightbox { position: fixed; inset: 0; background: rgba(17,17,20,.93); display: none; z-index: 50; }
+  #lightbox.open { display: block; }
+  #lb-stage { position: absolute; inset: 0; overflow: hidden; cursor: grab; }
+  #lb-stage.panning { cursor: grabbing; }
+  #lb-stage svg { transform-origin: 0 0; position: absolute; top: 0; left: 0; }
+  #lb-bar { position: absolute; top: 16px; right: 16px; display: flex; gap: 8px; z-index: 2; }
+  #lb-bar button {
+    background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46; border-radius: 8px;
+    font: 600 13px/1 "Inter Tight", sans-serif; padding: 9px 14px; cursor: pointer;
+  }
+  #lb-bar button:hover { background: #3f3f46; }
+  #lb-help {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: #a1a1aa; font-size: 12.5px; pointer-events: none; z-index: 2;
+  }
+  .callout {
+    background: var(--soft); border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0; padding: 12px 16px; color: #3730a3; font-size: 14px;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12.5px;
+       text-transform: uppercase; letter-spacing: 0.04em; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td code, li code, p code {
+    background: #f4f4f5; border-radius: 4px; padding: 1px 5px;
+    font: 12.5px/1.5 "JetBrains Mono", ui-monospace, monospace;
+  }
+  ol.decisions li { margin: 10px 0; max-width: 75ch; }
+  ol.decisions b { color: var(--ink); }
+  .pill {
+    display: inline-block; background: #ecfdf5; color: #047857; border-radius: 100px;
+    font-size: 11.5px; font-weight: 600; padding: 1px 9px; vertical-align: 1px;
+  }
+  .pill-warn { background: #fffbeb; color: #b45309; }
+  .pill-open { background: #eef2ff; color: #4338ca; }
+  .diff { border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin: 12px 0; }
+  .diff b.t { display: block; margin-bottom: 4px; }
+  .diff p { margin: 0; color: #374151; font-size: 14px; max-width: 78ch; }
+  footer { margin-top: 64px; color: var(--muted); font-size: 13px;
+           border-top: 1px solid var(--line); padding-top: 16px; }
+  @media print { .diagram { break-inside: avoid; } h2 { break-after: avoid; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Roadmap — Data Model</h1>
+<p class="sub">Signal · database schema for the Roadmap section, derived from the prototype's in-memory model</p>
+
+<h2><span class="num">1</span>The big picture</h2>
+<p class="lead">
+Two axes joined by links — not one pyramid. <b>Product structure</b> describes what the product is
+made of; the <b>work axis</b> describes what we're doing and why. <b>Weekly Goals</b> and
+<b>Milestones</b> are planning lenses that point into both. Feedback never touches the roadmap
+directly — <b>intents are the only bridge</b>.
+</p>
+<div class="diagram" data-title="roadmap-big-picture">
+<span class="hint">⤢ click to zoom</span>
+<pre class="mermaid">
+flowchart LR
+    subgraph WORK["Work axis (WIP domain)"]
+        direction TB
+        SIG([Signals - feedback])
+        INT[Intents]
+        TSK[Tasks]
+        SIG -. "linked to" .-> INT
+        INT -. "broken into" .-> TSK
+    end
+
+    subgraph LENS["Planning lenses"]
+        direction TB
+        GOAL["Weekly Goals<br/>(time: one week)"]
+        MS["Milestones<br/>(scope + MoSCoW)"]
+    end
+
+    subgraph STRUCT["Product structure"]
+        direction TB
+        AREA["Capability Area"]
+        FG["Feature Set<br/>(optional layer)"]
+        FEAT[Feature]
+        CAP[Capabilities]
+        SLC["Feature Slices"]
+        AREA --> FG --> FEAT
+        AREA --> FEAT
+        FEAT --> CAP
+        FEAT --> SLC
+    end
+
+    INT == "links to" ==> GOAL
+    INT == "links to" ==> FEAT
+    INT == "links to" ==> SLC
+    GOAL == "advances" ==> FEAT
+    GOAL == "advances" ==> SLC
+    GOAL == "advances" ==> CAP
+    MS == "includes" ==> GOAL
+    MS == "scopes (with MoSCoW)" ==> STRUCT
+</pre>
+</div>
+<h2><span class="num">2</span>Entity–relationship diagram</h2>
+<div class="diagram" data-title="roadmap-erd">
+<span class="hint">⤢ click to zoom</span>
+<pre class="mermaid">
+erDiagram
+    PRODUCT_AREA ||--o{ FEATURE_GROUP : "contains"
+    PRODUCT_AREA |o--o{ FEATURE : "contains (NULL = unassigned)"
+    FEATURE_GROUP |o--o{ FEATURE : "optionally groups"
+    FEATURE ||--o{ CAPABILITY : "has"
+    FEATURE ||--o{ FEATURE_SLICE : "broken into"
+
+    WEEKLY_GOAL }o--o{ FEATURE : "advances"
+    WEEKLY_GOAL }o--o{ FEATURE_SLICE : "advances"
+    WEEKLY_GOAL }o--o{ CAPABILITY : "advances"
+    WEEKLY_GOAL }o--o{ INTENT : "executed by"
+
+    FEATURE }o--o{ INTENT : "built by"
+    FEATURE_SLICE }o--o{ INTENT : "built by"
+
+    MILESTONE ||--o{ SCOPE_LINK : "defines scope via"
+    SCOPE_LINK }o--|| PRODUCT_AREA : "one of"
+    SCOPE_LINK }o--|| FEATURE_GROUP : "one of"
+    SCOPE_LINK }o--|| FEATURE : "one of"
+    SCOPE_LINK }o--|| FEATURE_SLICE : "one of"
+    SCOPE_LINK }o--|| CAPABILITY : "one of"
+    MILESTONE }o--o{ WEEKLY_GOAL : "includes"
+    MILESTONE ||--o{ AUDIT_ENTRY : "append-only history"
+    MILESTONE |o--o{ MILESTONE : "cloned into versions"
+
+    PRODUCT_AREA {
+        uuid id PK
+        text title
+        text description
+    }
+    FEATURE_GROUP {
+        uuid id PK
+        uuid area_id FK
+        text title
+    }
+    FEATURE {
+        uuid id PK
+        uuid area_id FK "NULL = unassigned"
+        uuid feature_group_id FK "optional"
+        text title
+        enum status "not_started / planned / in_progress / done"
+    }
+    CAPABILITY {
+        uuid id PK
+        uuid feature_id FK
+        text title
+    }
+    FEATURE_SLICE {
+        uuid id PK
+        uuid feature_id FK
+        text title
+        enum status "not_started / planned / in_progress / done"
+    }
+    WEEKLY_GOAL {
+        uuid id PK
+        text title
+        date week_start "anchors a 7-day week bucket"
+        enum status "planned / in_progress / done (human-set)"
+        text notes
+    }
+    INTENT {
+        uuid id PK "wip_items WHERE type = intent"
+        text title
+        enum column "backlog / to_do / in_progress / done"
+    }
+    MILESTONE {
+        uuid id PK "code name: Release"
+        text title
+        enum status "planned / in_progress / released"
+        date target_start
+        date target_end
+        uuid version_family_id "groups versions"
+        uuid version_parent_id FK "cloned from"
+        int version_number "label v1, v2 derived from this"
+        timestamptz locked_at "set = read-only snapshot; one unlocked head per family"
+    }
+    SCOPE_LINK {
+        uuid milestone_id FK
+        enum object_kind "area / feature_set / feature / slice / capability"
+        uuid object_id "exactly one target"
+        enum priority "must / should / could / wont"
+        text note
+    }
+    AUDIT_ENTRY {
+        uuid version_family_id "history survives version deletion"
+        uuid milestone_id FK "NULL once the version is deleted"
+        timestamptz at
+        text kind "renamed, scope_added, moscow_changed, ... (extensible)"
+        text summary "human-readable fallback"
+        text previous_value "denormalized - survives deletion"
+        text next_value
+    }
+</pre>
+</div>
+
+<h2><span class="num">3</span>Entities at a glance</h2>
+<table>
+<thead><tr><th>Entity</th><th>UI name</th><th>Code name</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>product_areas</code></td><td>Capability Area</td><td><code>ProductArea</code></td><td>Top of the structure tree</td></tr>
+<tr><td><code>feature_groups</code></td><td>Feature Set</td><td><code>FeatureGroup</code></td><td>Optional middle layer inside an area</td></tr>
+<tr><td><code>features</code></td><td>Feature</td><td><code>Feature</code></td><td>Core structure unit; can be <b>unassigned</b> (no area) when created ad-hoc from a goal card</td></tr>
+<tr><td><code>product_capabilities</code></td><td>Capability</td><td><code>ProductCapability</code></td><td>What a feature can do</td></tr>
+<tr><td><code>feature_slices</code></td><td>Feature Slice</td><td><code>FeatureSlice</code></td><td>Deliverable vertical cut of a feature</td></tr>
+<tr><td><code>weekly_goals</code></td><td>Weekly Goal</td><td><code>WeeklyGoal</code></td><td>Week-scoped planning unit; status is human-set, never derived</td></tr>
+<tr><td><code>milestones</code></td><td>Milestone</td><td><code>Release</code></td><td>Pure scope package — owns nothing, points at goals + structure</td></tr>
+<tr><td><code>milestone_audit_entries</code></td><td>Change history</td><td><code>MilestoneAuditEntry</code></td><td>Append-only log of every milestone mutation</td></tr>
+<tr><td><code>wip_items</code></td><td>Intent / Task</td><td><code>Wip</code></td><td>Owned by the WIP domain; roadmap only links to <code>type = 'intent'</code></td></tr>
+</tbody>
+</table>
+
+<h2><span class="num">4</span>Relationships (the join tables)</h2>
+<p class="lead">
+Everything connecting the axes is <b>many-to-many</b>. In the prototype these were ID arrays
+stored on one side; in the database each becomes a join table. Two of them carry payload — that's
+why they exist as first-class tables rather than plain pairs:
+</p>
+<table>
+<thead><tr><th>Link</th><th>Cardinality</th><th>Payload on the link</th></tr></thead>
+<tbody>
+<tr><td>Goal ↔ Feature / Slice / Capability</td><td>n : m</td><td>—</td></tr>
+<tr><td>Goal ↔ Intent</td><td>n : m</td><td>—</td></tr>
+<tr><td>Feature ↔ Intent, Slice ↔ Intent</td><td>n : m</td><td>—</td></tr>
+<tr><td>Milestone ↔ Goal</td><td>n : m</td><td>—</td></tr>
+<tr><td><b>Milestone ↔ structure object</b> (<code>milestone_scope_links</code>)</td><td>n : m, polymorphic over 5 kinds</td><td><b>MoSCoW priority + note</b> — the same feature can be <i>must</i> in one milestone and <i>could</i> in another</td></tr>
+<tr><td>Intent → Capability</td><td><i>derived, not stored</i></td><td>Computed transitively through the intent's goals</td></tr>
+</tbody>
+</table>
+
+<h2><span class="num">5</span>Design decisions worth defending in a review</h2>
+<ol class="decisions">
+<li><b>Arrays → join tables.</b> The prototype stores links as ID arrays on the container and scans for reverse lookups. Join tables give both directions, referential integrity, and indexes.</li>
+<li><b>MoSCoW lives on the milestone↔object link, not on the object.</b> The prototype's most important rule: priority is <i>per milestone</i>, deliberately non-cascading to children.</li>
+<li><b>Milestone versioning = self-reference + family key.</b> Cloning (from <i>any</i> version, snapshots included) creates the next version in the same <code>version_family_id</code>; the current head gets <code>locked_at</code> stamped. Exactly one unlocked, editable head per family — enforced by a unique index. Deleting the head hands editability back to the previous version.</li>
+<li><b>Audit log is append-only and denormalized.</b> Entries store object <i>labels</i> and old/new <i>values as text</i>, and are anchored to the version <i>family</i> — so history survives deletion of the objects it mentions and even of the milestone version itself.</li>
+<li><b>Unassigned features are <code>area_id NULL</code></b> (prototype used an empty string) — supports the "type a feature name on a goal card, organize it later" flow.</li>
+<li><b>Signals stay out of the roadmap schema.</b> The only doorway is <code>wip_items</code> of type <code>intent</code>; link tables enforce that with a composite foreign key on <code>(id, type)</code>.</li>
+</ol>
+
+<h2><span class="num">6</span>Proposed rules — how they map onto this model</h2>
+<p class="lead">
+A target rule set was proposed for this domain (DeliveryWeek → Goals → Intents → Tasks, a strict
+product hierarchy, slice-level capability selection). Most of it is already how this model works.
+Below: what matches as-is, where the rules and the current model genuinely differ, and the
+decisions the rules force before the schema can adopt them.
+</p>
+
+<h3 style="font-size:16px; margin:28px 0 4px">Already matching <span class="pill">no change needed</span></h3>
+<table>
+<tbody>
+<tr><td>Goal ↔ Intent and Signal ↔ Intent are many-to-many</td><td>Exactly the current link tables — goals link intents, never own them.</td></tr>
+<tr><td>Area → Feature Set → Feature → Capabilities + Slices</td><td>The structure tree is identical, including capabilities and slices as the two breakdowns of a feature.</td></tr>
+<tr><td>"Releases package scope; they do not define hierarchy"</td><td>Milestones here own nothing — they are pure pointer collections over goals and product objects.</td></tr>
+<tr><td>"Signals do not generate work automatically"</td><td>Built-in philosophy: finishing work never auto-resolves feedback without a human review step.</td></tr>
+<tr><td>The Auth worked example</td><td>"Auth → Registration → Register with email → 5 capabilities → beta slice" is literally this model's own seed example, so the vocabulary maps one-to-one.</td></tr>
+</tbody>
+</table>
+
+<h3 style="font-size:16px; margin:28px 0 4px">Real differences <span class="pill pill-warn">rules ≠ current model</span></h3>
+
+<div class="diff">
+<b class="t">1 · DeliveryWeek is an entity in the rules; today it's just a date.</b>
+<p>Currently a goal carries a <code>week_start</code> date and "a week" is an implicit bucket of
+goals sharing that date. The rules make DeliveryWeek first-class (e.g. <code>DW-24</code>) with
+goals pointing at it. Same meaning, cleaner structure — an easy, low-risk upgrade.</p>
+</div>
+
+<div class="diff">
+<b class="t">2 · "Every Feature belongs to one FeatureGroup" is stricter than the current flow.</b>
+<p>Today the Feature Set layer is <i>optional</i>, and features can exist fully unassigned — by
+design: you can type a new feature name straight onto a goal card and organize it into the
+hierarchy later. The latest prototype iteration loosened this further (capabilities and slices can
+now be captured before their parent feature is known, flagged "needs mapping"). The rules and this
+capture-now-map-later workflow can coexist only if the rule is treated as the <b>end-state
+invariant</b> — everything must be mapped <i>eventually</i> — rather than a hard constraint at
+creation time. That's a product decision, not a schema detail.</p>
+</div>
+
+<div class="diff">
+<b class="t">3 · Slice ↔ Capability selection — and the open question of where MoSCoW lives.</b>
+<p>The rules make the slice-capability table first-class (included / excluded / deferred, plus
+must / should / could / wont). The current model deliberately dropped it: the prototype removed
+that table from the UI in V1 and moved MoSCoW priorities to the <b>milestone scope links</b>
+instead (so the same feature can be a <i>must</i> in one release and a <i>could</i> in another).
+The rules put the weights back at the slice level and say nothing about release-level priorities.
+These are two different planning philosophies — per-slice scope vs. per-release scope — and the
+schema needs a decision: one of them, or both.</p>
+</div>
+
+<div class="diff">
+<b class="t">4 · "Every Task belongs to one Intent" is a real hierarchy the current model only approximates.</b>
+<p>There is no parent column today — "tasks of an intent" are inferred from follow-up references,
+and tasks can be standalone or created directly from a signal. The rules make parentage mandatory
+and (by listing only Signal ↔ Intent) imply signals stop linking to tasks directly. Adopting this
+means adding a required parent and retiring the standalone-task and task-from-signal flows.</p>
+</div>
+
+<div class="diff">
+<b class="t">5 · "Every active Intent must satisfy at least one Goal" — not enforced anywhere yet.</b>
+<p>Intents are routinely born goal-less today (from signals, or as planning drafts in a group
+workspace). Conveniently, the newest prototype changes add an <code>isDraft</code> flag on
+intents — which provides exactly the active/inactive distinction this rule needs: a draft may be
+goal-less, and <i>finalizing</i> it would require at least one goal link. Enforcement would live
+in the app layer.</p>
+</div>
+
+<h3 style="font-size:16px; margin:28px 0 4px">Decisions the rules force <span class="pill pill-open">open</span></h3>
+<table>
+<tbody>
+<tr><td style="white-space:nowrap"><b>Themes</b></td><td>The rules keep themes as overlay tags ("Auth Readiness"). The current schema doesn't model them — adopting the rules brings them back as two small tables (same link pattern as milestone scope).</td></tr>
+<tr><td><b>Release scope breadth</b></td><td>The rules scope releases to Features / Slices / Capabilities / Goals. The current model also allows linking whole Areas and Feature Sets ("broad planning levels"). Keep or cut?</td></tr>
+<tr><td><b>Rule 12</b></td><td>"Future goals link broad, near-term goals link concrete" is a <i>process</i> rule — the link mechanism already supports both granularities; the time-horizon discipline would be app-level validation or convention, not schema.</td></tr>
+<tr><td><b>Versioning &amp; audit</b></td><td>Milestone version families and the append-only audit log aren't mentioned in the rules and conflict with nothing — they survive by default unless explicitly dropped.</td></tr>
+</tbody>
+</table>
+
+<footer>
+Full PostgreSQL DDL: <code>docs/roadmap-db-schema.sql</code> · Markdown source: <code>docs/roadmap-schema.md</code>
+</footer>
+</div>
+
+<div id="lightbox">
+  <div id="lb-stage"></div>
+  <div id="lb-bar">
+    <button id="lb-download" title="Download this diagram as a standalone SVG file">⬇ Download SVG</button>
+    <button id="lb-close">✕ Close</button>
+  </div>
+  <div id="lb-help">scroll to zoom · drag to pan · double-click to zoom in · Esc to close</div>
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', er: { useMaxWidth: true } });
+  await mermaid.run();
+
+  const lb = document.getElementById('lightbox');
+  const stage = document.getElementById('lb-stage');
+  let svg = null, title = 'diagram', scale = 1, tx = 0, ty = 0;
+
+  const apply = () => { svg.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`; };
+
+  function openLightbox(srcSvg, diagramTitle) {
+    stage.innerHTML = '';
+    title = diagramTitle;
+    svg = srcSvg.cloneNode(true);
+    svg.removeAttribute('width');
+    svg.style.maxWidth = 'none';
+    const vb = svg.viewBox.baseVal;
+    const w = vb.width || 1200, h = vb.height || 800;
+    svg.style.width = w + 'px';
+    svg.style.height = h + 'px';
+    scale = Math.min(innerWidth * 0.92 / w, innerHeight * 0.86 / h, 2.5);
+    tx = (innerWidth - w * scale) / 2;
+    ty = (innerHeight - h * scale) / 2;
+    stage.appendChild(svg);
+    apply();
+    lb.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeLightbox() {
+    lb.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  function zoomAt(cx, cy, factor) {
+    const ns = Math.min(Math.max(scale * factor, 0.15), 10);
+    tx = cx - (cx - tx) * (ns / scale);
+    ty = cy - (cy - ty) * (ns / scale);
+    scale = ns;
+    apply();
+  }
+
+  stage.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+  }, { passive: false });
+
+  stage.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY, 1.6));
+
+  let drag = null;
+  stage.addEventListener('mousedown', e => {
+    drag = { x: e.clientX - tx, y: e.clientY - ty };
+    stage.classList.add('panning');
+  });
+  window.addEventListener('mousemove', e => {
+    if (!drag) return;
+    tx = e.clientX - drag.x;
+    ty = e.clientY - drag.y;
+    apply();
+  });
+  window.addEventListener('mouseup', () => { drag = null; stage.classList.remove('panning'); });
+
+  document.getElementById('lb-close').addEventListener('click', closeLightbox);
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+  document.getElementById('lb-download').addEventListener('click', () => {
+    const clone = svg.cloneNode(true);
+    clone.style.transform = '';
+    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = title + '.svg';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  document.querySelectorAll('.diagram').forEach(d => {
+    d.addEventListener('click', () => {
+      const s = d.querySelector('svg');
+      if (s) openLightbox(s, d.dataset.title || 'diagram');
+    });
+  });
+</script>
+</body>
+</html>
