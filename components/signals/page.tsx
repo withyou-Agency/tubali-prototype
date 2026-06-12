@@ -6488,11 +6488,10 @@ function SignalGroupsListView() {
     appMode,
   } = useStore();
   const readOnly = appMode === "client";
-  // Drives the unified "New group" modal — combines manual signal
-  // picking with AI suggestions in one flow.
-  const [newGroupOpen, setNewGroupOpen] = useState(false);
-  // Drives the "Prepare multiple groups" workspace — lets the user
-  // draft several groups in one sitting (typical pre-meeting flow).
+  // Drives the unified "New groups" workspace — single primary entry
+  // for group creation. The workspace handles both one-off and bulk
+  // creation: opens with one empty group; the user adds more with
+  // "+ Add group" if they're prepping a batch.
   const [prepareGroupsOpen, setPrepareGroupsOpen] = useState(false);
 
   // Sort: in-review / open first, archived last; within each bucket,
@@ -6508,24 +6507,12 @@ function SignalGroupsListView() {
     });
   }, [signalGroups]);
 
-  // Creation goes through the unified modal — name + context + reasons
-  // + an initial set of signals picked manually, from AI suggestions,
-  // or both.
-  const handleConfirmCreate = (input: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }) => {
-    const id = createSignalGroup({
-      name: input.name,
-      notes: input.notes,
-      reasons: input.reasons,
-      signalIds: input.signalIds,
-    });
-    setNewGroupOpen(false);
-    openGroup(id);
-  };
-  // Bulk create from the Prepare-groups workspace. We create each
-  // draft as a real group and leave the user on the list view so they
-  // can scan everything that just landed — opening one would hide the
-  // others. Single-draft case is the only exception: jumping into the
-  // workspace makes more sense when there's only one new group.
+  // Bulk create from the New-groups workspace. We create each
+  // prepared group as a real SignalGroup and leave the user on the
+  // list view so they can scan everything that just landed — opening
+  // one would hide the others. Single-group case is the only
+  // exception: jumping into the workspace makes more sense when only
+  // one new group was created.
   const handleConfirmCreateMany = (drafts: { name: string; notes?: string; reasons: SignalGroupReason[]; signalIds: string[] }[]) => {
     let firstId: string | null = null;
     for (const d of drafts) {
@@ -6584,38 +6571,20 @@ function SignalGroupsListView() {
         </span>
         <span style={{ flex: 1 }} />
         {!readOnly && (
-          <>
-            <button
-              onClick={() => setPrepareGroupsOpen(true)}
-              title="Draft several groups at once — typical before a review meeting. Run AI per group, review, then create them all."
-              style={{
-                padding: "5px 12px",
-                background: "var(--bg)",
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)", borderRadius: "var(--radius)",
-                fontSize: "var(--fs-meta)", fontWeight: 500,
-                cursor: "pointer", whiteSpace: "nowrap",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
-              onMouseLeave={e => (e.currentTarget.style.background = "var(--bg)")}
-            >
-              ✦ Prepare groups
-            </button>
-            <button
-              onClick={() => setNewGroupOpen(true)}
-              title="Define a new group — pick signals manually or use AI suggestions"
-              style={{
-                padding: "5px 12px",
-                background: "var(--accent)",
-                color: "white",
-                border: "none", borderRadius: "var(--radius)",
-                fontSize: "var(--fs-meta)", fontWeight: 600,
-                cursor: "pointer", whiteSpace: "nowrap",
-              }}
-            >
-              + New group
-            </button>
-          </>
+          <button
+            onClick={() => setPrepareGroupsOpen(true)}
+            title="Open the New groups workspace — start with one group, add more if you're prepping a batch, then create them all together."
+            style={{
+              padding: "5px 12px",
+              background: "var(--accent)",
+              color: "white",
+              border: "none", borderRadius: "var(--radius)",
+              fontSize: "var(--fs-meta)", fontWeight: 600,
+              cursor: "pointer", whiteSpace: "nowrap",
+            }}
+          >
+            + New groups
+          </button>
         )}
       </div>
 
@@ -6626,7 +6595,7 @@ function SignalGroupsListView() {
             margin: "60px auto", maxWidth: 420, textAlign: "center",
             fontSize: "var(--fs-body)", color: "var(--text-tertiary)", lineHeight: 1.6,
           }}>
-            No groups yet. Click <strong style={{ color: "var(--text)" }}>+ New group</strong> above to define a group — name it, give it some context, and pick signals manually or from AI suggestions in the same flow. You can also select signals first and use <strong style={{ color: "var(--text)" }}>Save as group</strong> in the selection bar as a shortcut.
+            No groups yet. Click <strong style={{ color: "var(--text)" }}>+ New groups</strong> above to open the workspace — name a group, give it some context, and pick signals manually or with AI. Prepping for a meeting? Add more groups in the same workspace and create them all together. You can also select signals first and use <strong style={{ color: "var(--text)" }}>Save as group</strong> in the selection bar as a shortcut.
           </div>
         ) : (
           <div style={{
@@ -6654,12 +6623,6 @@ function SignalGroupsListView() {
         )}
       </div>
 
-      {newGroupOpen && (
-        <NewGroupModal
-          onClose={() => setNewGroupOpen(false)}
-          onConfirm={handleConfirmCreate}
-        />
-      )}
       {prepareGroupsOpen && (
         <PrepareGroupsModal
           onClose={() => setPrepareGroupsOpen(false)}
@@ -7992,12 +7955,14 @@ function PrepareGroupsModal({
   const [drafts, setDrafts] = useState<GroupDraft[]>(() => [makeDraft()]);
   const [activeId, setActiveId] = useState<string>(drafts[0].id);
   const [pickQuery, setPickQuery] = useState("");
-  // Inline confirmation for "create with 0 signals selected". Single
-  // = one draft via its own Create button; all = the bulk Create-all
-  // action with at least one empty ready draft in the mix.
-  const [confirmEmpty, setConfirmEmpty] = useState<
-    null | { kind: "single"; id: string } | { kind: "all" }
-  >(null);
+  // Browse-list density — comfortable cards (default), 2-column card
+  // grid, or compact one-liners. Pure UI state; doesn't affect what
+  // signals are shown.
+  const [density, setDensity] = useState<"comfortable" | "compact" | "grid">("comfortable");
+  // Inline confirmation for "create with 0 signals selected". Only
+  // the per-group create path triggers this — the bulk Create-all-
+  // groups button skips signal-less groups by design.
+  const [confirmEmpty, setConfirmEmpty] = useState<{ id: string } | null>(null);
   const [reasonsOpenForDraft, setReasonsOpenForDraft] = useState<string | null>(null);
 
   // If the active draft gets removed, fall back to the first available.
@@ -8114,7 +8079,7 @@ function PrepareGroupsModal({
   const overlapMap = useMemo(() => {
     const m = new Map<string, { id: string; label: string }[]>();
     for (const d of drafts) {
-      const label = d.name.trim() || "Untitled draft";
+      const label = d.name.trim() || "Untitled group";
       for (const sid of d.selectedSignalIds) {
         const arr = m.get(sid) ?? [];
         arr.push({ id: d.id, label });
@@ -8124,12 +8089,16 @@ function PrepareGroupsModal({
     return m;
   }, [drafts]);
 
-  // A draft is "ready" if it has a name (the group needs a label).
-  // Empty signal sets are allowed but trigger a confirm step before
-  // creation, so users don't accidentally create blank groups.
-  const isReady = (d: GroupDraft) => d.name.trim().length > 0;
+  // Validation states drive both the per-group hint in the sidebar
+  // and the bulk button label/count. We name three explicit states
+  // (rather than a binary "draft/ready" pill) so the user sees
+  // *what's missing*, not just *whether it's a draft*.
+  const hasName = (d: GroupDraft) => d.name.trim().length > 0;
+  const hasSignals = (d: GroupDraft) => d.selectedSignalIds.length > 0;
+  const isReady = (d: GroupDraft) => hasName(d) && hasSignals(d);
   const readyDrafts = drafts.filter(isReady);
-  const readyEmptyDrafts = readyDrafts.filter(d => d.selectedSignalIds.length === 0);
+  const namedButEmpty = drafts.filter(d => hasName(d) && !hasSignals(d));
+  const missingNameDrafts = drafts.filter(d => !hasName(d));
 
   const doCreate = (toCreate: GroupDraft[]) => {
     if (toCreate.length === 0) return;
@@ -8142,31 +8111,25 @@ function PrepareGroupsModal({
   };
   const handleCreateSingle = (id: string) => {
     const d = drafts.find(x => x.id === id);
-    if (!d || !isReady(d)) return;
-    if (d.selectedSignalIds.length === 0) {
-      setConfirmEmpty({ kind: "single", id });
+    if (!d || !hasName(d)) return;
+    // Single-group create is the only path that creates a group with
+    // zero signals — and only after a confirm. Bulk create skips
+    // signal-less groups entirely (they're flagged in the sidebar).
+    if (!hasSignals(d)) {
+      setConfirmEmpty({ id });
       return;
     }
     doCreate([d]);
   };
   const handleCreateAll = () => {
     if (readyDrafts.length === 0) return;
-    if (readyEmptyDrafts.length > 0) {
-      setConfirmEmpty({ kind: "all" });
-      return;
-    }
     doCreate(readyDrafts);
   };
   const confirmCreate = () => {
     if (!confirmEmpty) return;
-    if (confirmEmpty.kind === "single") {
-      const d = drafts.find(x => x.id === confirmEmpty.id);
-      setConfirmEmpty(null);
-      if (d) doCreate([d]);
-    } else {
-      setConfirmEmpty(null);
-      doCreate(readyDrafts);
-    }
+    const d = drafts.find(x => x.id === confirmEmpty.id);
+    setConfirmEmpty(null);
+    if (d) doCreate([d]);
   };
 
   // Active-draft AI map — only signals that survived dismiss/selected.
@@ -8241,7 +8204,7 @@ function PrepareGroupsModal({
               Prepare multiple groups
             </div>
             <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-              Draft several groups before a review meeting · {drafts.length} draft{drafts.length === 1 ? "" : "s"} · {readyDrafts.length} ready to create
+              Set up several signal groups, choose signals for each, then create them together.
             </div>
           </div>
           <button
@@ -8250,8 +8213,8 @@ function PrepareGroupsModal({
             title={
               anyAiLoading ? "AI is already scanning…"
                 : anyAiCanRunForAll
-                  ? "Run AI matching for every draft that has a description or selected signal."
-                  : "Add a description (or pick a signal) in at least one draft first."
+                  ? "Run AI matching for every group that has a description or selected signal."
+                  : "Add a description (or pick a signal) in at least one group first."
             }
             style={{
               padding: "6px 14px", borderRadius: 100,
@@ -8271,20 +8234,6 @@ function PrepareGroupsModal({
               }} />
             )}
             ✦ Find signals for all
-          </button>
-          <button
-            onClick={handleCreateAll}
-            disabled={readyDrafts.length === 0}
-            title={readyDrafts.length === 0 ? "Add a name to at least one draft first" : `Create the ${readyDrafts.length} ready draft${readyDrafts.length === 1 ? "" : "s"}`}
-            style={{
-              padding: "6px 14px", borderRadius: "var(--radius)",
-              background: readyDrafts.length > 0 ? "var(--accent)" : "var(--bg-sunken)",
-              color: readyDrafts.length > 0 ? "white" : "var(--text-tertiary)",
-              border: "none", fontSize: 12, fontWeight: 600,
-              cursor: readyDrafts.length > 0 ? "pointer" : "default",
-            }}
-          >
-            Create all ready ({readyDrafts.length})
           </button>
           <button
             onClick={onClose}
@@ -8307,9 +8256,7 @@ function PrepareGroupsModal({
             borderBottom: "1px solid rgba(245,158,11,0.30)",
           }}>
             <span style={{ fontSize: 12, color: "var(--text)" }}>
-              {confirmEmpty.kind === "single"
-                ? "This group has no signals selected. Create it empty — you can add signals later?"
-                : `${readyEmptyDrafts.length} of the ${readyDrafts.length} ready group${readyDrafts.length === 1 ? "" : "s"} have no signals selected. Create them anyway — you can add signals later?`}
+              This group has no signals selected. Create it empty — you can add signals later?
             </span>
             <span style={{ flex: 1 }} />
             <button
@@ -8322,7 +8269,7 @@ function PrepareGroupsModal({
               onClick={confirmCreate}
               style={{ padding: "4px 12px", borderRadius: "var(--radius)", background: "#b45309", color: "white", border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}
             >
-              {confirmEmpty.kind === "single" ? "Create empty" : "Create all"}
+              Create empty
             </button>
           </div>
         )}
@@ -8342,20 +8289,27 @@ function PrepareGroupsModal({
               display: "flex", alignItems: "center", gap: 8,
             }}>
               <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-tertiary)", flex: 1 }}>
-                Group drafts
+                Groups to create
               </span>
               <button
                 onClick={addDraft}
-                title="Add a new empty draft"
+                title="Add another group to prepare"
                 style={{ padding: "4px 10px", borderRadius: 100, background: "var(--accent)", color: "white", border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
               >
-                + Add draft
+                + Add group
               </button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
               {drafts.map(d => {
                 const isActive = d.id === activeId;
-                const ready = isReady(d);
+                // Validation: tell the user *what's missing*, not just
+                // whether the group is "ready". Three states, colour-coded.
+                const status: { dot: string; text: string; color: string } =
+                  !hasName(d)
+                    ? { dot: "var(--text-tertiary)", text: "Missing name", color: "var(--text-tertiary)" }
+                    : !hasSignals(d)
+                      ? { dot: "#b45309", text: "No signals selected", color: "#b45309" }
+                      : { dot: "#15803d", text: "Ready to create", color: "#15803d" };
                 const suggested = d.aiState === "ready"
                   ? d.aiMatches.filter(m => !d.selectedSignalIds.includes(m.signalId) && !d.dismissedSignalIds.includes(m.signalId)).length
                   : 0;
@@ -8373,13 +8327,8 @@ function PrepareGroupsModal({
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {d.name.trim() || <span style={{ color: "var(--text-tertiary)", fontWeight: 500, fontStyle: "italic" }}>Untitled draft</span>}
+                        {d.name.trim() || <span style={{ color: "var(--text-tertiary)", fontWeight: 500, fontStyle: "italic" }}>Untitled group</span>}
                       </span>
-                      {ready ? (
-                        <span title="Ready to create" style={{ fontSize: 9, fontWeight: 700, color: "#15803d", background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.30)", borderRadius: 100, padding: "0 6px" }}>READY</span>
-                      ) : (
-                        <span title="Needs a name before it can be created" style={{ fontSize: 9, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 100, padding: "0 6px" }}>DRAFT</span>
-                      )}
                     </div>
                     <div style={{
                       fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.4,
@@ -8388,9 +8337,13 @@ function PrepareGroupsModal({
                     }}>
                       {d.notes.trim() || <em style={{ color: "var(--text-tertiary)" }}>No description yet</em>}
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--text-tertiary)" }}>
-                      <span><strong style={{ color: "var(--text-secondary)" }}>{d.selectedSignalIds.length}</strong> selected</span>
-                      {d.aiState === "ready" && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--text-tertiary)", flexWrap: "wrap" }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: status.dot }} />
+                        <span style={{ color: status.color, fontWeight: 500 }}>{status.text}</span>
+                      </span>
+                      <span>· <strong style={{ color: "var(--text-secondary)" }}>{d.selectedSignalIds.length}</strong> signal{d.selectedSignalIds.length === 1 ? "" : "s"}</span>
+                      {d.aiState === "ready" && suggested > 0 && (
                         <span>· <strong style={{ color: "#7e22ce" }}>{suggested}</strong> suggested</span>
                       )}
                       {d.aiState === "loading" && (
@@ -8400,13 +8353,10 @@ function PrepareGroupsModal({
                           scanning…
                         </span>
                       )}
-                      {d.aiState === "idle" && (d.notes.trim() || d.selectedSignalIds.length > 0) && (
-                        <span>· AI not run</span>
-                      )}
                       <span style={{ flex: 1 }} />
                       <span
                         role="button"
-                        title="Duplicate this draft"
+                        title="Duplicate this group"
                         onClick={e => { e.stopPropagation(); duplicateDraft(d.id); }}
                         style={{ padding: "1px 5px", borderRadius: 4, cursor: "pointer", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center" }}
                         onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-sunken)")}
@@ -8416,7 +8366,7 @@ function PrepareGroupsModal({
                       </span>
                       <span
                         role="button"
-                        title="Remove this draft"
+                        title="Remove this group"
                         onClick={e => { e.stopPropagation(); removeDraft(d.id); }}
                         style={{ padding: "1px 5px", borderRadius: 4, cursor: "pointer", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center" }}
                         onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-sunken)")}
@@ -8539,7 +8489,7 @@ function PrepareGroupsModal({
                               <button
                                 type="button"
                                 onClick={() => toggleSignalInDraft(active.id, sid)}
-                                aria-label="Remove from this draft"
+                                aria-label="Remove from this group"
                                 style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "inherit", display: "inline-flex" }}
                               >
                                 <X size={10} />
@@ -8564,11 +8514,39 @@ function PrepareGroupsModal({
                         )}
                       </span>
                       <span style={{ flex: 1 }} />
+                      {/* Density toggle — Cards (single column), Grid
+                          (2 per row), or Compact (one-liner). Pure UI
+                          preference; doesn't filter what's shown. */}
+                      <div style={{
+                        display: "inline-flex", alignItems: "center", gap: 0,
+                        padding: 2, borderRadius: 100,
+                        background: "var(--bg-sunken)", border: "1px solid var(--border)",
+                      }}>
+                        {(["comfortable", "grid", "compact"] as const).map(d => {
+                          const isActive = density === d;
+                          return (
+                            <button
+                              key={d}
+                              onClick={() => setDensity(d)}
+                              title={d === "comfortable" ? "Stacked cards" : d === "grid" ? "Grid — 2 per row" : "Compact list"}
+                              style={{
+                                padding: "3px 10px", borderRadius: 100, border: "none",
+                                background: isActive ? "var(--bg)" : "transparent",
+                                color: isActive ? "var(--text)" : "var(--text-secondary)",
+                                fontSize: 11, fontWeight: 500, cursor: "pointer",
+                                boxShadow: isActive ? "var(--shadow-sm)" : "none",
+                              }}
+                            >
+                              {d === "comfortable" ? "Cards" : d === "grid" ? "Grid" : "Compact"}
+                            </button>
+                          );
+                        })}
+                      </div>
                       {active.aiState === "idle" && (
                         <button
                           onClick={() => runFindForDraft(active.id)}
                           disabled={!aiCanRun(active)}
-                          title={aiCanRun(active) ? "Scan every signal for matches against this draft's description and selected signals." : "Write a description or pick a signal first."}
+                          title={aiCanRun(active) ? "Scan every signal for matches against this group's description and selected signals." : "Write a description or pick a signal first."}
                           style={{ padding: "5px 12px", borderRadius: 100, background: aiCanRun(active) ? "#7e22ce" : "var(--bg-sunken)", color: aiCanRun(active) ? "white" : "var(--text-tertiary)", border: "none", fontSize: 11.5, fontWeight: 600, cursor: aiCanRun(active) ? "pointer" : "default" }}
                         >
                           ✦ Find relevant signals
@@ -8625,9 +8603,16 @@ function PrepareGroupsModal({
                       onFocus={e => (e.target.style.borderColor = "var(--accent)")}
                       onBlur={e => (e.target.style.borderColor = "var(--border)")}
                     />
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: 4 }}>
+                    <div style={{
+                      display: density === "grid" ? "grid" : "flex",
+                      ...(density === "grid"
+                        ? { gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", alignItems: "stretch" }
+                        : { flexDirection: "column" }),
+                      gap: density === "compact" ? 3 : density === "grid" ? 8 : 6,
+                      paddingRight: 4,
+                    }}>
                       {browseFiltered.length === 0 ? (
-                        <div style={{ padding: 12, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center" }}>
+                        <div style={{ padding: 12, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", gridColumn: "1 / -1" }}>
                           {pickQuery ? "No signals match. Try a shorter query." : "Every signal is already selected."}
                         </div>
                       ) : (
@@ -8639,7 +8624,7 @@ function PrepareGroupsModal({
                             <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 2, opacity: dismissed ? 0.55 : 1 }}>
                               <ModalSignalRow
                                 signal={s}
-                                density="comfortable"
+                                density={density}
                                 isSelected={false}
                                 onToggle={() => toggleSignalInDraft(active.id, s.id)}
                                 signalGroups={signalGroups}
@@ -8649,9 +8634,9 @@ function PrepareGroupsModal({
                                 aiWhy={ai?.why}
                               />
                               {(otherDrafts.length > 0 || (ai && !dismissed)) && (
-                                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 28, fontSize: 10.5, color: "var(--text-tertiary)" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: density === "compact" ? 8 : 28, fontSize: 10.5, color: "var(--text-tertiary)" }}>
                                   {otherDrafts.length > 0 && (
-                                    <span title="A signal can belong to multiple groups. This one's already selected in other drafts.">
+                                    <span title="A signal can belong to multiple groups. This one's already selected in other prepared groups.">
                                       ⇢ Also selected in: <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{otherDrafts.map(x => x.label).join(", ")}</span>
                                     </span>
                                   )}
@@ -8674,41 +8659,112 @@ function PrepareGroupsModal({
                   </div>
                 </div>
 
-                {/* Per-draft footer */}
+                {/* Per-group footer — secondary actions only. The
+                    primary CTA (Create all groups) lives in the global
+                    bottom bar so the workflow points at creating the
+                    whole batch, not one at a time. */}
                 <div style={{
                   display: "flex", alignItems: "center", gap: 8,
-                  padding: "10px 18px",
+                  padding: "8px 18px",
                   borderTop: "1px solid var(--border)",
                   background: "var(--bg-sunken)", flexShrink: 0,
                 }}>
                   <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                     {active.selectedSignalIds.length === 0
-                      ? "No signals selected — group will start empty."
-                      : `${active.selectedSignalIds.length} signal${active.selectedSignalIds.length === 1 ? "" : "s"} will be added`}
+                      ? "No signals selected — this group will be skipped when you create all groups."
+                      : `${active.selectedSignalIds.length} signal${active.selectedSignalIds.length === 1 ? "" : "s"} will be added to this group`}
                   </span>
                   <span style={{ flex: 1 }} />
                   <button
                     onClick={() => removeDraft(active.id)}
-                    style={{ padding: "5px 12px", borderRadius: "var(--radius)", background: "transparent", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500, cursor: "pointer" }}
+                    title="Remove this group from the workspace"
+                    style={{ background: "transparent", border: "none", color: "var(--text-tertiary)", fontSize: 11, fontWeight: 500, cursor: "pointer", padding: "4px 8px", textDecoration: "underline" }}
                   >
-                    Remove draft
+                    Remove group
                   </button>
                   <button
                     onClick={() => handleCreateSingle(active.id)}
-                    disabled={!isReady(active)}
-                    title={isReady(active) ? "Create this group only" : "Add a group name first"}
-                    style={{ padding: "5px 14px", borderRadius: "var(--radius)", background: isReady(active) ? "var(--accent)" : "var(--bg-sunken)", color: isReady(active) ? "white" : "var(--text-tertiary)", border: "none", fontSize: 11.5, fontWeight: 600, cursor: isReady(active) ? "pointer" : "default" }}
+                    disabled={!hasName(active)}
+                    title={hasName(active) ? "Create only this group right now (the rest stay in the workspace)" : "Add a group name first"}
+                    style={{ background: "transparent", border: "none", color: hasName(active) ? "var(--text-secondary)" : "var(--text-tertiary)", fontSize: 11, fontWeight: 500, cursor: hasName(active) ? "pointer" : "default", padding: "4px 8px", textDecoration: "underline" }}
                   >
-                    Create this group
+                    Create this group only
                   </button>
                 </div>
               </>
             ) : (
               <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: 13 }}>
-                Pick a draft from the left, or add a new one.
+                Pick a group from the left, or add a new one.
               </div>
             )}
           </div>
+        </div>
+
+        {/* ── Bottom summary + primary CTA ──────────────────────────
+            One main action: Create all groups. Summary line reads
+            like a checklist ("3 prepared · 2 ready · 1 needs name")
+            so the user can see at a glance what's left to finish. */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "12px 18px",
+          borderTop: "1px solid var(--border)",
+          background: "var(--bg)", flexShrink: 0,
+        }}>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <strong style={{ color: "var(--text)" }}>{drafts.length}</strong> group{drafts.length === 1 ? "" : "s"} prepared
+            <span style={{ color: "var(--text-tertiary)" }}>·</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#15803d" }}>
+              <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#15803d" }} />
+              <strong>{readyDrafts.length}</strong> ready
+            </span>
+            {namedButEmpty.length > 0 && (
+              <>
+                <span style={{ color: "var(--text-tertiary)" }}>·</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#b45309" }}>
+                  <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#b45309" }} />
+                  <strong>{namedButEmpty.length}</strong> no signal{namedButEmpty.length === 1 ? "" : "s"}
+                </span>
+              </>
+            )}
+            {missingNameDrafts.length > 0 && (
+              <>
+                <span style={{ color: "var(--text-tertiary)" }}>·</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--text-tertiary)" }}>
+                  <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--text-tertiary)" }} />
+                  <strong>{missingNameDrafts.length}</strong> need{missingNameDrafts.length === 1 ? "s" : ""} name
+                </span>
+              </>
+            )}
+          </div>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={onClose}
+            style={{ padding: "6px 14px", borderRadius: "var(--radius)", background: "transparent", border: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, fontWeight: 500, cursor: "pointer" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleCreateAll}
+            disabled={readyDrafts.length === 0}
+            title={
+              readyDrafts.length === 0
+                ? "Finish at least one group — add a name and pick signals."
+                : (namedButEmpty.length + missingNameDrafts.length) > 0
+                  ? `Create the ${readyDrafts.length} ready group${readyDrafts.length === 1 ? "" : "s"}. The ${namedButEmpty.length + missingNameDrafts.length} incomplete group${(namedButEmpty.length + missingNameDrafts.length) === 1 ? "" : "s"} will stay in the workspace.`
+                  : `Create all ${readyDrafts.length} prepared group${readyDrafts.length === 1 ? "" : "s"}.`
+            }
+            style={{
+              padding: "7px 18px", borderRadius: "var(--radius)",
+              background: readyDrafts.length > 0 ? "var(--accent)" : "var(--bg-sunken)",
+              color: readyDrafts.length > 0 ? "white" : "var(--text-tertiary)",
+              border: "none", fontSize: 13, fontWeight: 600,
+              cursor: readyDrafts.length > 0 ? "pointer" : "default",
+            }}
+          >
+            {(namedButEmpty.length + missingNameDrafts.length) > 0
+              ? `Create ready groups (${readyDrafts.length})`
+              : `Create all groups (${readyDrafts.length})`}
+          </button>
         </div>
       </div>
     </div>,
