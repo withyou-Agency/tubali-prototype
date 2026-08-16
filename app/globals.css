@@ -2,36 +2,37 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #ffffff;
-  --bg-sunken: #fafafa;
-  --bg-hover: #f5f5f4;
-  --bg-selected: #eef2ff;
-  --bg-overlay: rgba(15,15,17,0.48);
-  --border: #ececec;
-  --border-strong: #dcdcdc;
-  --border-focus: #5b6cff;
-  --text: #0f0f11;
-  --text-secondary: #5f5f66;
-  --text-tertiary: #8b8b92;
-  --text-disabled: #b8b8bd;
-  --accent: #5b6cff;
-  --accent-hover: #4a5bf0;
-  --accent-soft: #eef0ff;
-  --status-new: #f59e0b;
-  --status-accepted: #10b981;
-  --status-ready: #0d9488;
-  --status-ready-soft: #f0fdfa;
-  --status-ready-border: #5eead4;
-  --status-rejected: #9ca3af;
-  --status-skipped: #8b5cf6;
-  --task: #7c3aed;
-  --intent: #0ea5e9;
+  --bg: #fff8df;
+  --bg-sunken: #f2e7ff;
+  --bg-hover: #e8d5ff;
+  --bg-selected: #dcc0ff;
+  --bg-overlay: rgba(36,22,47,0.52);
+  --border: #dbc8e8;
+  --border-strong: #bd9fd1;
+  --border-focus: #6f1dab;
+  --text: #24162f;
+  --text-secondary: #685776;
+  --text-tertiary: #8f7c9d;
+  --text-disabled: #bcadc7;
+  --accent: #6f1dab;
+  --accent-hover: #571486;
+  --accent-soft: #e9d0ff;
+  --status-new: #f97316;
+  --status-accepted: #059669;
+  --status-ready: #0284c7;
+  --status-ready-soft: #e7f8ff;
+  --status-ready-border: #67d8f3;
+  --status-rejected: #8f8198;
+  --status-skipped: #db2777;
+  --task: #db2777;
+  --intent: #0284c7;
+  --scrollbar-thumb: #b99bcd;
   --radius-sm: 4px;
   --radius: 6px;
   --radius-lg: 8px;
-  --shadow-sm: 0 1px 2px rgba(15,15,17,0.04);
-  --shadow-md: 0 4px 12px rgba(15,15,17,0.06), 0 1px 2px rgba(15,15,17,0.04);
-  --shadow-lg: 0 20px 48px rgba(15,15,17,0.12), 0 2px 6px rgba(15,15,17,0.06);
+  --shadow-sm: 0 1px 2px rgba(72,32,96,0.07);
+  --shadow-md: 0 4px 14px rgba(72,32,96,0.10), 0 1px 2px rgba(72,32,96,0.06);
+  --shadow-lg: 0 20px 52px rgba(72,32,96,0.18), 0 2px 8px rgba(72,32,96,0.09);
   /* density default */
   --row-h: 36px; --row-pad: 8px 12px; --gap: 10px;
   --card-pad: 12px; --card-gap: 10px;
@@ -42,36 +43,35 @@
    override the same custom properties so every component picks up the new
    palette without per-component dark-mode branches. */
 [data-theme="dark"] {
-  --bg:           #15171b;
-  --bg-sunken:    #1c1f24;
-  --bg-hover:     #23272d;
-  --bg-selected:  #1f2640;
-  --bg-overlay:   rgba(0,0,0,0.55);
-  --border:       #2a2f37;
-  --border-strong:#3a414b;
-  --border-focus: #6c7bff;
-  --text:         #ececef;
-  --text-secondary: #b4b6bb;
-  --text-tertiary:  #82858c;
-  --text-disabled:  #4f535a;
-  --accent:       #6c7bff;
-  --accent-hover: #8390ff;
-  --accent-soft:  rgba(108,123,255,0.14);
-  --status-new:       #f59e0b;
+  --bg:           #16081f;
+  --bg-sunken:    #240d32;
+  --bg-hover:     #371449;
+  --bg-selected:  #51206b;
+  --bg-overlay:   rgba(7,3,12,0.70);
+  --border:       #4a245a;
+  --border-strong:#75438a;
+  --border-focus: #c084fc;
+  --text:         #fff7ff;
+  --text-secondary: #d3bfd9;
+  --text-tertiary:  #a78daf;
+  --text-disabled:  #6f5b78;
+  --accent:       #9d3bea;
+  --accent-hover: #8425ce;
+  --accent-soft:  rgba(216,180,254,0.20);
+  --status-new:       #fb923c;
   --status-accepted:  #34d399;
-  --status-ready:     #2dd4bf;
-  --status-ready-soft:    rgba(20,184,166,0.12);
-  --status-ready-border:  rgba(45,212,191,0.40);
-  --status-rejected:  #6b7280;
-  --status-skipped:   #a78bfa;
-  --task:   #a78bfa;
-  --intent: #38bdf8;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.30);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.20);
-  --shadow-lg: 0 24px 56px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.32);
+  --status-ready:     #22d3ee;
+  --status-ready-soft:    rgba(34,211,238,0.12);
+  --status-ready-border:  rgba(34,211,238,0.42);
+  --status-rejected:  #907a9b;
+  --status-skipped:   #f472b6;
+  --task:   #fb7185;
+  --intent: #22d3ee;
+  --scrollbar-thumb: #75438a;
+  --shadow-sm: 0 1px 2px rgba(4,1,8,0.38);
+  --shadow-md: 0 5px 16px rgba(4,1,8,0.42), 0 1px 2px rgba(4,1,8,0.28);
+  --shadow-lg: 0 24px 60px rgba(4,1,8,0.62), 0 2px 10px rgba(77,31,109,0.30);
 }
-/* Make the dark scrollbar thumb visible against the dark surface. */
-[data-theme="dark"] *:hover::-webkit-scrollbar-thumb { background: #3a414b; }
 /* Native form-controls (selects/inputs) inherit OS appearance — nudge them
    to use the dark palette so they don't render as bright pop-outs. */
 [data-theme="dark"] input,
@@ -96,8 +96,9 @@ button { cursor: pointer; border: none; background: none; padding: 0; }
 :focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; border-radius: 4px; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: transparent; border-radius: 10px; }
-*:hover::-webkit-scrollbar-thumb { background: #d4d4d4; }
+*:hover::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
 ::-webkit-scrollbar-track { background: transparent; }
+::selection { background: var(--accent-soft); color: var(--text); }
 .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.92em; }
 @keyframes slideUp { from { transform: translateX(-50%) translateY(20px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
 @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
